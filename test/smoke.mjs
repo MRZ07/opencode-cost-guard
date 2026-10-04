@@ -6,7 +6,7 @@ import {
   fmtNum,
   normalizeOptions,
   resolveLimit,
-} from "../index.js";
+} from "../lib.js";
 
 const logs = [];
 const client = {
