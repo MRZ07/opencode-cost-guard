@@ -3,20 +3,23 @@
  *
  * opencode (v1 and v2) auto-loads every .js file and package directory under
  * ~/.config/opencode/plugins/ and treats every exported function as a plugin.
- * Shipping one file that exports only CostGuard avoids double-loading and
- * helper functions being registered as plugins.
+ * Shipping one bundled file that exports only CostGuard avoids double-loading
+ * and helper registration, and inlines zod so no node_modules is needed.
+ *
+ * Requires Bun (opencode ships it): bun build.
  */
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { statSync } from "node:fs";
 
-const lib = readFileSync(new URL("./lib.js", import.meta.url), "utf8");
-const entry = readFileSync(new URL("./index.js", import.meta.url), "utf8");
+const dir = dirname(fileURLToPath(import.meta.url));
 
-const stripExports = (src) => src.replace(/^export /gm, "");
-const stripImport = (src) => src.replace(/^import .*? from "\.\/lib\.js";\n/m, "");
+execFileSync(
+  "bun",
+  ["build", "index.js", "--outfile", "dist/opencode-cost-guard.js", "--target", "node", "--format", "esm"],
+  { cwd: dir, stdio: "inherit" },
+);
 
-const banner = "// GENERATED FILE — do not edit. Build with: node build-local.mjs\n";
-const out = banner + stripExports(lib) + "\n" + stripImport(entry);
-
-mkdirSync(new URL("./dist/", import.meta.url), { recursive: true });
-writeFileSync(new URL("./dist/opencode-cost-guard.js", import.meta.url), out);
-console.log("wrote dist/opencode-cost-guard.js (" + out.length + " bytes)");
+const out = `${dir}/dist/opencode-cost-guard.js`;
+console.log(`wrote dist/opencode-cost-guard.js (${statSync(out).size} bytes)`);

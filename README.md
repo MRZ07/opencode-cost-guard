@@ -50,7 +50,13 @@ Per-agent limits use the first matching glob, so list specific agents before `*`
 
 ## On the limit
 
-`block` + `stop` ends the session. `block` + `ask` stops normal tools, asks you via the `question` tool, and raises the budget through `cost_guard_extend` if you approve. `question` and `cost_guard_extend` stay callable while blocked.
+`block` + `stop` ends the session. `block` + `ask` stops normal tools and asks you via the `question` tool. The agent asks whether to continue and how much extra USD to grant, then calls `cost_guard_extend` with that amount:
+
+```
+cost-guard: session limit is now 13.00 USD.
+```
+
+`question` and `cost_guard_extend` stay callable while blocked. Omit the amount to add one more limit.
 
 Every block, warn, and extend reports why:
 

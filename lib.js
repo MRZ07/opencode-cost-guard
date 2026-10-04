@@ -328,8 +328,8 @@ export function createCostGuardController(cfg, client) {
         throw new Error(
           `cost-guard: session cost ${s.cost.toFixed(2)} USD exceeded limit ${s.limit} USD` +
             `${s.agent ? ` (agent ${s.agent})` : ""}. Ask the user with the \`question\` tool whether to` +
-            ` continue; if approved, call \`cost_guard_extend\` (optionally {"usd": <amount>}) and resume;` +
-            ` otherwise stop.\n${explainCost(s)}`,
+            ` continue and how much extra USD to grant, then call \`cost_guard_extend\` with` +
+            ` {"usd": <amount>} and resume; otherwise stop.\n${explainCost(s)}`,
         );
       }
 

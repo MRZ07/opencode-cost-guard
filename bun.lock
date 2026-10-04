@@ -1,0 +1,21 @@
+{
+  "lockfileVersion": 2,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "opencode-cost-guard",
+      "dependencies": {
+        "zod": "^4.6.5",
+      },
+      "peerDependencies": {
+        "@opencode-ai/plugin": ">=1",
+      },
+      "optionalPeers": [
+        "@opencode-ai/plugin",
+      ],
+    },
+  },
+  "packages": {
+    "zod": ["zod@4.6.5", "", {}, "sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q=="],
+  }
+}
