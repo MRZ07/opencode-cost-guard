@@ -1,11 +1,16 @@
 import type { Hooks, Plugin, PluginOptions } from "@opencode-ai/plugin";
 
+/** USD amount, or a per-agent map of glob → USD ("*" / "default" is the fallback). */
+export type LimitSpec = number | Record<string, number>;
+
 export interface CostGuardOptions extends PluginOptions {
-  /** USD per session before acting. Default: 5 */
-  limit?: number;
+  /** USD per session, or per-agent `{ "agentGlob": usd, "*": usd }`. Default: 5 */
+  limit?: LimitSpec;
+  /** Alias for `limit` (takes precedence). */
+  limits?: LimitSpec;
   /** "warn" logs only; "block" caps output and stops tool calls. Default: "warn" */
   action?: "warn" | "block";
-  /** Fraction of `limit` at which a warning is logged (0..1). Default: 0.8 */
+  /** Fraction of a session's limit at which a warning is logged (0..1). Default: 0.8 */
   warnRatio?: number;
   /** Agent globs to enforce. Default: ["*"] */
   agents?: string[];
@@ -17,10 +22,23 @@ export interface CostGuardOptions extends PluginOptions {
   notify?: boolean;
 }
 
+export interface ResolvedOptions {
+  limit: number;
+  limits: Array<[string, number]>;
+  action: "warn" | "block";
+  warnRatio: number;
+  agents: string[];
+  exclude: string[];
+  maxOutputTokensOnBlock: number;
+  notify: boolean;
+}
+
 export declare function globMatch(pattern: string, value: string): boolean;
-export declare function normalizeOptions(options?: PluginOptions): Required<CostGuardOptions>;
+export declare function parseLimits(raw: unknown, fallback?: number): { default: number; perAgent: Array<[string, number]> };
+export declare function resolveLimit(cfg: Pick<ResolvedOptions, "limit" | "limits">, agent?: string): number;
+export declare function normalizeOptions(options?: PluginOptions): ResolvedOptions;
 export declare function createCostGuard(
-  cfg: ReturnType<typeof normalizeOptions>,
+  cfg: ResolvedOptions,
   client: { app: { log: (input: { body: Record<string, unknown> }) => Promise<unknown> } },
 ): Hooks;
 

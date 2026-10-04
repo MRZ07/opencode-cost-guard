@@ -39,9 +39,9 @@ Options are passed as the second element of the plugin tuple. All optional:
 
 | Option | Type | Default | Meaning |
 |---|---|---|---|
-| `limit` | number | `5` | USD per session before acting |
+| `limit` / `limits` | number \| object | `5` | USD per session, or a per-agent map `{ "agentGlob": usd, "*": usd }` |
 | `action` | `"warn"` \| `"block"` | `"warn"` | warn = log only; block = cap output + stop tool calls |
-| `warnRatio` | number `0..1` | `0.8` | fraction of `limit` at which a warning is logged |
+| `warnRatio` | number `0..1` | `0.8` | fraction of a session's limit at which a warning is logged |
 | `agents` | string[] globs | `["*"]` | agents to enforce |
 | `exclude` | string[] globs | `[]` | agents to skip |
 | `maxOutputTokensOnBlock` | number | `1` | output cap once blocked |
@@ -67,6 +67,28 @@ Hard-stop the cheap/frontier split — block everything except cheap agents:
   "warnRatio": 0.5
 }]]
 ```
+
+### Per-agent limits
+
+Pass an object to give each agent its own ceiling. The **first matching glob
+wins**, and `*` / `default` is the fallback:
+
+```jsonc
+"plugin": [["opencode-cost-guard", {
+  "action": "block",
+  "limit": {
+    "fusion-planner": 2,          // frontier lead: tight
+    "fusion-code-worker": 3,      // implementation: a bit more
+    "fusion-ops": 0.5,            // shell sidekick: almost nothing
+    "fusion-review-deep": 5,      // frontier review: allow more
+    "fusion-*": 2,                // any other fusion agent
+    "*": 5                        // everything else
+  }
+}]]
+```
+
+Subagents run in their own session, so every `fusion-*` subagent is metered
+individually — `fusion-ops` can't burn the planner's budget.
 
 ## How it works
 

@@ -49,17 +49,60 @@ function anyMatch(patterns, value) {
 }
 
 /**
+ * Parse a global or per-agent limit spec.
+ * Accepts: number | { "agentGlob": number, ... , "*": number }
+ * Keys `*` / `default` set the fallback; other keys are per-agent patterns.
+ * @param {unknown} raw
+ * @param {number} fallback
+ */
+export function parseLimits(raw, fallback = 5) {
+  const isUsd = (n) => Number.isFinite(n) && n > 0;
+  if (raw == null) return { default: fallback, perAgent: [] };
+  if (typeof raw === "number") return { default: isUsd(raw) ? raw : fallback, perAgent: [] };
+  if (typeof raw === "object") {
+    let def = fallback;
+    /** @type {Array<[string, number]>} */
+    const perAgent = [];
+    for (const [key, value] of Object.entries(raw)) {
+      const n = Number(value);
+      if (!isUsd(n)) continue;
+      if (key === "*" || key === "default") def = n;
+      else perAgent.push([key, n]);
+    }
+    return { default: def, perAgent };
+  }
+  return { default: fallback, perAgent: [] };
+}
+
+/**
+ * Resolve the effective USD limit for an agent (first matching pattern wins,
+ * then the fallback).
+ * @param {{ limits?: Array<[string, number]>, limit: number }} cfg
+ * @param {string|undefined} agent
+ */
+export function resolveLimit(cfg, agent) {
+  if (agent && cfg.limits && cfg.limits.length) {
+    for (const [pattern, n] of cfg.limits) {
+      if (globMatch(pattern, agent)) return n;
+    }
+  }
+  return cfg.limit;
+}
+
+/**
  * @param {PluginOptions|undefined} options
  */
 export function normalizeOptions(options = {}) {
   const envLimit = process.env.OPENCODE_COST_GUARD_LIMIT;
   const envAction = process.env.OPENCODE_COST_GUARD_ACTION;
 
-  const limit = Number(envLimit ?? options.limit ?? 5);
+  const spec = envLimit != null ? Number(envLimit) : (options.limits ?? options.limit);
+  const parsed = parseLimits(spec, 5);
   const action = String(envAction ?? options.action ?? "warn").toLowerCase();
 
   const cfg = {
-    limit: Number.isFinite(limit) && limit > 0 ? limit : 5,
+    limit: parsed.default,
+    limits: parsed.perAgent,
     action: action === "block" ? "block" : "warn",
     warnRatio:
       typeof options.warnRatio === "number" && options.warnRatio > 0 && options.warnRatio <= 1
@@ -84,7 +127,7 @@ export function createCostGuard(cfg, client) {
   const get = (id) => {
     let s = sessions.get(id);
     if (!s) {
-      s = { messages: new Map(), cost: 0, agent: undefined, model: undefined, warned: false, blocked: false };
+      s = { messages: new Map(), cost: 0, agent: undefined, model: undefined, warned: false, blocked: false, limit: undefined };
       sessions.set(id, s);
     }
     return s;
@@ -110,14 +153,17 @@ export function createCostGuard(cfg, client) {
   const overLimit = async (sessionID) => {
     const s = get(sessionID);
     if (!applies(s.agent)) return false;
-    if (s.cost >= cfg.limit) return true;
-    if (!s.warned && s.cost >= cfg.limit * cfg.warnRatio) {
+    const limit = resolveLimit(cfg, s.agent);
+    s.limit = limit;
+    if (s.cost >= limit) return true;
+    if (!s.warned && s.cost >= limit * cfg.warnRatio) {
       s.warned = true;
-      await log("warn", `cost ${s.cost.toFixed(2)} USD reached ${Math.round(cfg.warnRatio * 100)}% of limit ${cfg.limit}`, {
-        sessionID,
-        agent: s.agent,
-        cost: s.cost,
-      });
+      await log(
+        "warn",
+        `cost ${s.cost.toFixed(2)} USD reached ${Math.round(cfg.warnRatio * 100)}% of limit ${limit}` +
+          `${s.agent ? ` (agent ${s.agent})` : ""}`,
+        { sessionID, agent: s.agent, cost: s.cost, limit },
+      );
     }
     return false;
   };
@@ -150,7 +196,7 @@ export function createCostGuard(cfg, client) {
         output.maxOutputTokens = cfg.maxOutputTokensOnBlock;
         if (!s.blocked) {
           s.blocked = true;
-          await log("error", `limit ${cfg.limit} USD exceeded; capping output`, {
+          await log("error", `limit ${s.limit} USD exceeded; capping output`, {
             sessionID: input.sessionID,
             agent: s.agent,
             cost: s.cost,
@@ -164,14 +210,14 @@ export function createCostGuard(cfg, client) {
       if ((await overLimit(input.sessionID)) && cfg.action === "block") {
         if (!s.blocked) {
           s.blocked = true;
-          await log("error", `limit ${cfg.limit} USD exceeded; stopping tool calls`, {
+          await log("error", `limit ${s.limit} USD exceeded; stopping tool calls`, {
             sessionID: input.sessionID,
             tool: input.tool,
             cost: s.cost,
           });
         }
         throw new Error(
-          `cost-guard: session cost ${s.cost.toFixed(2)} USD exceeded limit ${cfg.limit} USD` +
+          `cost-guard: session cost ${s.cost.toFixed(2)} USD exceeded limit ${s.limit} USD` +
             `${s.agent ? ` (agent ${s.agent})` : ""}. Raise the limit or switch to a cheaper model.`,
         );
       }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createCostGuard, normalizeOptions } from "../index.js";
+import { createCostGuard, normalizeOptions, resolveLimit } from "../index.js";
 
 const logs = [];
 const client = {
@@ -74,6 +74,30 @@ function assistantEvent(sessionID, id, cost, extra = {}) {
   await h.event(assistantEvent("s4", "m1", 10));
   await h.event({ event: { type: "session.deleted", properties: { info: { id: "s4" } } } });
   await h.event(assistantEvent("s4", "m1", 0)); // fresh map after delete
+}
+
+// 6. per-agent limits
+{
+  const cfg = normalizeOptions({ limit: { "fusion-ops": 0.5, "fusion-*": 8, "*": 10 }, action: "block" });
+  assert.equal(cfg.limit, 10, "fallback limit");
+  assert.equal(resolveLimit(cfg, "fusion-ops"), 0.5);
+  assert.equal(resolveLimit(cfg, "fusion-planner"), 8);
+  assert.equal(resolveLimit(cfg, "build"), 10);
+  assert.equal(resolveLimit(cfg, undefined), 10);
+
+  // ops blocked at 0.5
+  const h = createCostGuard(cfg, client);
+  await h["chat.message"]({ sessionID: "o", agent: "fusion-ops" });
+  await h.event(assistantEvent("o", "m1", 0.6));
+  await assert.rejects(() => h["tool.execute.before"]({ tool: "bash", sessionID: "o" }), /cost-guard/);
+
+  // planner allowed until 8
+  const h2 = createCostGuard(cfg, client);
+  await h2["chat.message"]({ sessionID: "p", agent: "fusion-planner" });
+  await h2.event(assistantEvent("p", "m1", 3));
+  await h2["tool.execute.before"]({ tool: "bash", sessionID: "p" }); // ok
+  await h2.event(assistantEvent("p", "m2", 5)); // 8 -> over
+  await assert.rejects(() => h2["tool.execute.before"]({ tool: "bash", sessionID: "p" }), /cost-guard/);
 }
 
 console.log("smoke: all assertions passed");
