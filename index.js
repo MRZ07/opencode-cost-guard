@@ -29,25 +29,35 @@ export const CostGuard = async ({ client }, options) => {
   const { hooks, extend, describe } = createCostGuardController(cfg, client);
 
   if (cfg.onBlock === "ask") {
+    let extendTool;
     try {
       const { tool } = await import("@opencode-ai/plugin");
-      hooks.tool = {
-        cost_guard_extend: tool({
-          description:
-            "Cost guard: extend this session's USD budget after the user approves continuing. " +
-            "Call this once the user has agreed to continue past the cost limit.",
-          args: {
-            usd: tool.schema.number().optional().describe("USD to add to the session limit (default: one more limit)"),
-          },
-          async execute(args, context) {
-            const newLimit = extend(context.sessionID, args?.usd);
-            return `cost-guard: budget extended to ${newLimit.toFixed(2)} USD for this session.\n${describe(context.sessionID)}`;
-          },
-        }),
-      };
+      extendTool = tool({
+        description:
+          "Cost guard: extend this session's USD budget after the user approves continuing. " +
+          "Call this once the user has agreed to continue past the cost limit.",
+        args: {
+          usd: tool.schema.number().optional().describe("USD to add to the session limit (default: one more limit)"),
+        },
+        async execute(args, context) {
+          const limit = extend(context.sessionID, args?.usd);
+          return `cost-guard: budget extended to ${limit.toFixed(2)} USD for this session.\n${describe(context.sessionID)}`;
+        },
+      });
     } catch {
-      /* @opencode-ai/plugin runtime unavailable; ask flow still works without auto-extend */
+      // Runtime without @opencode-ai/plugin resolvable (e.g. symlinked install):
+      // register a dependency-free tool that adds one more limit.
+      extendTool = {
+        description:
+          "Cost guard: extend this session's USD budget by one more limit after the user approves continuing.",
+        args: {},
+        async execute(_args, context) {
+          const limit = extend(context.sessionID);
+          return `cost-guard: budget extended to ${limit.toFixed(2)} USD for this session.\n${describe(context.sessionID)}`;
+        },
+      };
     }
+    hooks.tool = { cost_guard_extend: extendTool };
   }
 
   return hooks;
