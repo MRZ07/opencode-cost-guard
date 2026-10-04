@@ -1,0 +1,31 @@
+{
+  "name": "opencode-cost-guard",
+  "version": "0.1.0",
+  "description": "Cost guard plugin for opencode: warn or hard-stop a session when its LLM spend exceeds a configurable USD limit.",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./index.js",
+      "types": "./index.d.ts"
+    }
+  },
+  "files": ["index.js", "index.d.ts", "README.md", "LICENSE"],
+  "scripts": {
+    "test": "node test/smoke.mjs"
+  },
+  "keywords": ["opencode", "opencode-plugin", "cost", "budget", "guard", "llm"],
+  "license": "MIT",
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1"
+  },
+  "peerDependenciesMeta": {
+    "@opencode-ai/plugin": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
