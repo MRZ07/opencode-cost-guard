@@ -114,20 +114,25 @@ export function normalizeOptions(options = {}) {
       typeof options.maxOutputTokensOnBlock === "number" && options.maxOutputTokensOnBlock >= 1
         ? options.maxOutputTokensOnBlock
         : 1,
+    onBlock: options.onBlock === "ask" ? "ask" : "stop",
     notify: options.notify !== false,
   };
   return cfg;
 }
 
-/** @returns {import("@opencode-ai/plugin").Hooks} */
-export function createCostGuard(cfg, client) {
+/**
+ * Build the guard controller: hooks plus an `extend` handle used by the
+ * `cost_guard_extend` tool and by tests.
+ * @returns {{hooks: import("@opencode-ai/plugin").Hooks, extend: (sessionID: string, usd?: number) => number}}
+ */
+export function createCostGuardController(cfg, client) {
   /** @type {Map<string, {messages: Map<string, number>, cost: number, agent?: string, model?: string, warned: boolean, blocked: boolean}>} */
   const sessions = new Map();
 
   const get = (id) => {
     let s = sessions.get(id);
     if (!s) {
-      s = { messages: new Map(), cost: 0, agent: undefined, model: undefined, warned: false, blocked: false, limit: undefined };
+      s = { messages: new Map(), cost: 0, agent: undefined, model: undefined, warned: false, blocked: false, limit: undefined, extra: 0 };
       sessions.set(id, s);
     }
     return s;
@@ -153,7 +158,7 @@ export function createCostGuard(cfg, client) {
   const overLimit = async (sessionID) => {
     const s = get(sessionID);
     if (!applies(s.agent)) return false;
-    const limit = resolveLimit(cfg, s.agent);
+    const limit = resolveLimit(cfg, s.agent) + (s.extra || 0);
     s.limit = limit;
     if (s.cost >= limit) return true;
     if (!s.warned && s.cost >= limit * cfg.warnRatio) {
@@ -168,7 +173,21 @@ export function createCostGuard(cfg, client) {
     return false;
   };
 
-  return {
+  /** Raise a session's limit and clear the blocked/warned flags. */
+  const extend = (sessionID, usd) => {
+    const s = get(sessionID);
+    const base = resolveLimit(cfg, s.agent);
+    const add = Number.isFinite(usd) && usd > 0 ? usd : base;
+    s.extra = (s.extra || 0) + add;
+    s.limit = base + s.extra;
+    s.blocked = false;
+    s.warned = false;
+    return s.limit;
+  };
+
+  const isAskTool = (tool) => tool === "question" || String(tool).includes("cost_guard");
+
+  const hooks = {
     event: async ({ event }) => {
       if (event.type === "message.updated") {
         const info = event.properties.info;
@@ -192,7 +211,8 @@ export function createCostGuard(cfg, client) {
     "chat.params": async (input, output) => {
       const s = get(input.sessionID);
       if (input.agent) s.agent = input.agent;
-      if ((await overLimit(input.sessionID)) && cfg.action === "block") {
+      const over = await overLimit(input.sessionID);
+      if (over && cfg.action === "block" && cfg.onBlock === "stop") {
         output.maxOutputTokens = cfg.maxOutputTokensOnBlock;
         if (!s.blocked) {
           s.blocked = true;
@@ -207,28 +227,79 @@ export function createCostGuard(cfg, client) {
 
     "tool.execute.before": async (input) => {
       const s = get(input.sessionID);
-      if ((await overLimit(input.sessionID)) && cfg.action === "block") {
+      const over = await overLimit(input.sessionID);
+      if (!over || cfg.action !== "block") return;
+
+      if (cfg.onBlock === "ask") {
+        if (isAskTool(input.tool)) return; // let the agent ask and extend
         if (!s.blocked) {
           s.blocked = true;
-          await log("error", `limit ${s.limit} USD exceeded; stopping tool calls`, {
+          await log("error", `limit ${s.limit} USD exceeded; awaiting user approval`, {
             sessionID: input.sessionID,
             tool: input.tool,
+            agent: s.agent,
             cost: s.cost,
           });
         }
         throw new Error(
           `cost-guard: session cost ${s.cost.toFixed(2)} USD exceeded limit ${s.limit} USD` +
-            `${s.agent ? ` (agent ${s.agent})` : ""}. Raise the limit or switch to a cheaper model.`,
+            `${s.agent ? ` (agent ${s.agent})` : ""}. Ask the user with the \`question\` tool whether to` +
+            ` continue; if approved, call \`cost_guard_extend\` (optionally {"usd": <amount>}) and resume;` +
+            ` otherwise stop.`,
         );
       }
+
+      if (!s.blocked) {
+        s.blocked = true;
+        await log("error", `limit ${s.limit} USD exceeded; stopping tool calls`, {
+          sessionID: input.sessionID,
+          tool: input.tool,
+          cost: s.cost,
+        });
+      }
+      throw new Error(
+        `cost-guard: session cost ${s.cost.toFixed(2)} USD exceeded limit ${s.limit} USD` +
+          `${s.agent ? ` (agent ${s.agent})` : ""}. Raise the limit or switch to a cheaper model.`,
+      );
     },
   };
+
+  return { hooks, extend };
+}
+
+/** @returns {import("@opencode-ai/plugin").Hooks} */
+export function createCostGuard(cfg, client) {
+  return createCostGuardController(cfg, client).hooks;
 }
 
 /** @type {Plugin} */
 export const CostGuard = async ({ client }, options) => {
   const cfg = normalizeOptions(options || {});
-  return createCostGuard(cfg, client);
+  const { hooks, extend } = createCostGuardController(cfg, client);
+
+  if (cfg.onBlock === "ask") {
+    try {
+      const { tool } = await import("@opencode-ai/plugin");
+      hooks.tool = {
+        cost_guard_extend: tool({
+          description:
+            "Cost guard: extend this session's USD budget after the user approves continuing. " +
+            "Call this once the user has agreed to continue past the cost limit.",
+          args: {
+            usd: tool.schema.number().optional().describe("USD to add to the session limit (default: one more limit)"),
+          },
+          async execute(args, context) {
+            const newLimit = extend(context.sessionID, args?.usd);
+            return `cost-guard: budget extended to ${newLimit.toFixed(2)} USD for this session.`;
+          },
+        }),
+      };
+    } catch {
+      /* @opencode-ai/plugin runtime unavailable; ask flow still works without auto-extend */
+    }
+  }
+
+  return hooks;
 };
 
 export default CostGuard;

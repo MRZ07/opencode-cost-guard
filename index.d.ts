@@ -18,6 +18,8 @@ export interface CostGuardOptions extends PluginOptions {
   exclude?: string[];
   /** Output token cap applied once blocked. Default: 1 */
   maxOutputTokensOnBlock?: number;
+  /** On limit: "stop" aborts immediately; "ask" instructs the agent to ask you, then extend. Default: "stop" */
+  onBlock?: "stop" | "ask";
   /** Emit logs (errors always log). Default: true */
   notify?: boolean;
 }
@@ -30,6 +32,7 @@ export interface ResolvedOptions {
   agents: string[];
   exclude: string[];
   maxOutputTokensOnBlock: number;
+  onBlock: "stop" | "ask";
   notify: boolean;
 }
 
@@ -41,6 +44,10 @@ export declare function createCostGuard(
   cfg: ResolvedOptions,
   client: { app: { log: (input: { body: Record<string, unknown> }) => Promise<unknown> } },
 ): Hooks;
+export declare function createCostGuardController(
+  cfg: ResolvedOptions,
+  client: { app: { log: (input: { body: Record<string, unknown> }) => Promise<unknown> } },
+): { hooks: Hooks; extend: (sessionID: string, usd?: number) => number };
 
 export declare const CostGuard: Plugin;
 export default CostGuard;

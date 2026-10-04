@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createCostGuard, normalizeOptions, resolveLimit } from "../index.js";
+import { createCostGuard, createCostGuardController, normalizeOptions, resolveLimit } from "../index.js";
 
 const logs = [];
 const client = {
@@ -98,6 +98,30 @@ function assistantEvent(sessionID, id, cost, extra = {}) {
   await h2["tool.execute.before"]({ tool: "bash", sessionID: "p" }); // ok
   await h2.event(assistantEvent("p", "m2", 5)); // 8 -> over
   await assert.rejects(() => h2["tool.execute.before"]({ tool: "bash", sessionID: "p" }), /cost-guard/);
+}
+
+// 7. ask mode: normal tools blocked, question/cost_guard_extend exempt, extend resumes
+{
+  const cfg = normalizeOptions({ limit: 1, action: "block", onBlock: "ask" });
+  assert.equal(cfg.onBlock, "ask");
+  const { hooks: h, extend } = createCostGuardController(cfg, client);
+  await h["chat.message"]({ sessionID: "a", agent: "fusion-planner" });
+  await h.event(assistantEvent("a", "m1", 2)); // over limit
+
+  // output is NOT capped in ask mode (the agent must be able to ask)
+  const output = { maxOutputTokens: 4096 };
+  await h["chat.params"]({ sessionID: "a", agent: "fusion-planner", model: {} }, output);
+  assert.equal(output.maxOutputTokens, 4096);
+
+  // normal tool blocked with an ask-instruction
+  await assert.rejects(() => h["tool.execute.before"]({ tool: "bash", sessionID: "a" }), /question/);
+  // question + extend tool are exempt
+  await h["tool.execute.before"]({ tool: "question", sessionID: "a" });
+  await h["tool.execute.before"]({ tool: "cost_guard_extend", sessionID: "a" });
+
+  // user approved -> extend, then work resumes
+  assert.equal(extend("a", 2), 3);
+  await h["tool.execute.before"]({ tool: "bash", sessionID: "a" });
 }
 
 console.log("smoke: all assertions passed");

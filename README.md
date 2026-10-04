@@ -45,6 +45,7 @@ Options are passed as the second element of the plugin tuple. All optional:
 | `agents` | string[] globs | `["*"]` | agents to enforce |
 | `exclude` | string[] globs | `[]` | agents to skip |
 | `maxOutputTokensOnBlock` | number | `1` | output cap once blocked |
+| `onBlock` | `"stop"` \| `"ask"` | `"stop"` | on limit: stop immediately, or ask you and extend |
 | `notify` | boolean | `true` | emit logs (errors always log) |
 
 Env overrides: `OPENCODE_COST_GUARD_LIMIT`, `OPENCODE_COST_GUARD_ACTION`.
@@ -89,6 +90,31 @@ wins**, and `*` / `default` is the fallback:
 
 Subagents run in their own session, so every `fusion-*` subagent is metered
 individually — `fusion-ops` can't burn the planner's budget.
+
+### Ask before stopping
+
+By default a block is a hard stop. With `onBlock: "ask"` the guard instead
+pauses and asks **you**:
+
+```jsonc
+"plugin": [["opencode-cost-guard", {
+  "limit": { "fusion-planner": 2, "fusion-ops": 0.5, "*": 5 },
+  "action": "block",
+  "onBlock": "ask"
+}]]
+```
+
+Flow when the limit is hit:
+
+1. Normal tool calls are blocked (output is **not** capped, so the agent can
+   still talk).
+2. The agent is told to ask you via the `question` tool ("continue?").
+3. You approve → the agent calls the `cost_guard_extend` tool, which raises
+   this session's limit (default: one more limit; `{ "usd": 2 }` adds $2).
+4. Work resumes. If you decline, the agent stops.
+
+`question` and `cost_guard_extend` stay callable while blocked — everything
+else is stopped.
 
 ## How it works
 
