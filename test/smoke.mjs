@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { createCostGuard, createCostGuardController, normalizeOptions, resolveLimit } from "../index.js";
+import {
+  createCostGuard,
+  createCostGuardController,
+  explainCost,
+  fmtNum,
+  normalizeOptions,
+  resolveLimit,
+} from "../index.js";
 
 const logs = [];
 const client = {
@@ -122,6 +129,39 @@ function assistantEvent(sessionID, id, cost, extra = {}) {
   // user approved -> extend, then work resumes
   assert.equal(extend("a", 2), 3);
   await h["tool.execute.before"]({ tool: "bash", sessionID: "a" });
+}
+
+// 8. why-analysis: tokens aggregated, reason appears in the block message
+{
+  assert.equal(fmtNum(4000000), "4.0M");
+  const line = explainCost({
+    cost: 12,
+    limit: 5,
+    turnCount: 30,
+    models: new Set(["p/m"]),
+    first: 0,
+    last: 600000,
+    tokens: { input: 3000000, output: 100000, reasoning: 700000, cacheRead: 4000000, cacheWrite: 0 },
+    agent: "fusion-planner",
+  });
+  assert.match(line, /large context/);
+  assert.match(line, /many turns/);
+  assert.match(line, /4\.0M cache-read/);
+
+  const cfg = normalizeOptions({ limit: 1, action: "block", onBlock: "stop" });
+  const h = createCostGuard(cfg, client);
+  await h.event(
+    assistantEvent("t", "m1", 2, {
+      tokens: { input: 3000000, output: 1000, reasoning: 0, cache: { read: 4000000, write: 0 } },
+      time: { created: 0 },
+    }),
+  );
+  try {
+    await h["tool.execute.before"]({ tool: "bash", sessionID: "t" });
+    assert.fail("should have thrown");
+  } catch (e) {
+    assert.match(e.message, /why: large context/);
+  }
 }
 
 console.log("smoke: all assertions passed");

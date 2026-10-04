@@ -116,6 +116,34 @@ Flow when the limit is hit:
 `question` and `cost_guard_extend` stay callable while blocked — everything
 else is stopped.
 
+### Why it hit the limit
+
+Every block/ask message, log line, and the `cost_guard_extend` result ends with
+a one-line cause analysis:
+
+```
+why: large context + many turns — model github-copilot/claude-opus-5.5;
+30 turns, 3.0M in / 100k out, 700k reasoning, 4.0M cache-read, ~10 min;
+12.00 USD > limit 5 (agent fusion-planner)
+```
+
+It summarises turns, input/output/reasoning/cache-read tokens, duration,
+model(s), and the inferred driver — `large context`, `many turns`,
+`heavy reasoning`, `output-heavy`, or `frequent frontier calls` — so you can
+see *why* it broke the budget before deciding to extend.
+
+### Local install (no npm)
+
+Copy `index.js` into `~/.config/opencode/plugins/` and configure via
+`~/.config/opencode/cost-guard.json` (or `$OPENCODE_COST_GUARD_CONFIG`):
+
+```json
+{ "action": "block", "onBlock": "ask", "limit": { "fusion-planner": 3, "fusion-ops": 0.5, "*": 5 } }
+```
+
+The plugin tuple wins over the file when both are present; env vars override
+both.
+
 ## How it works
 
 opencode plugin hooks:

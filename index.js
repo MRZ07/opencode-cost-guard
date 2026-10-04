@@ -90,6 +90,44 @@ export function resolveLimit(cfg, agent) {
 }
 
 /**
+ * Compact number formatting (1234 -> 1.2k, 1900000 -> 1.9M).
+ * @param {number} n
+ */
+export function fmtNum(n) {
+  const v = Number(n) || 0;
+  if (v >= 1e6) return (v / 1e6).toFixed(1) + "M";
+  if (v >= 1e3) return (v / 1e3).toFixed(0) + "k";
+  return String(v);
+}
+
+/**
+ * One-line, human-readable explanation of *why* a session hit its budget.
+ * @param {{cost:number, limit?:number, tokens?:{input:number,output:number,reasoning:number,cacheRead:number,cacheWrite:number}, turnCount?:number, models?:Set<string>|string[], first?:number, last?:number, agent?:string}} s
+ */
+export function explainCost(s) {
+  const t = s.tokens || { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
+  const causes = [];
+  if ((t.cacheRead || 0) > 2_000_000 || (t.input || 0) > 500_000) causes.push("large context");
+  if ((s.turnCount || 0) >= 15) causes.push("many turns");
+  if ((t.reasoning || 0) > 500_000) causes.push("heavy reasoning");
+  if ((t.output || 0) > (t.input || 0)) causes.push("output-heavy");
+  if (!causes.length) causes.push("frequent frontier calls");
+
+  const mins = s.first && s.last ? Math.max(1, Math.round((s.last - s.first) / 60000)) : null;
+  const bits = [`${s.turnCount || 0} turns`, `${fmtNum(t.input)} in / ${fmtNum(t.output)} out`];
+  if (t.reasoning) bits.push(`${fmtNum(t.reasoning)} reasoning`);
+  if (t.cacheRead) bits.push(`${fmtNum(t.cacheRead)} cache-read`);
+  if (mins) bits.push(`~${mins} min`);
+
+  const models = [...(s.models || [])].join(", ") || "unknown";
+  return (
+    `why: ${causes.join(" + ")} — model ${models}; ${bits.join(", ")}; ` +
+    `${(s.cost || 0).toFixed(2)} USD${s.limit ? ` > limit ${s.limit}` : ""}` +
+    `${s.agent ? ` (agent ${s.agent})` : ""}`
+  );
+}
+
+/**
  * @param {PluginOptions|undefined} options
  */
 export function normalizeOptions(options = {}) {
@@ -132,16 +170,48 @@ export function createCostGuardController(cfg, client) {
   const get = (id) => {
     let s = sessions.get(id);
     if (!s) {
-      s = { messages: new Map(), cost: 0, agent: undefined, model: undefined, warned: false, blocked: false, limit: undefined, extra: 0 };
+      s = {
+        messages: new Map(),
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+        turnCount: 0,
+        models: new Set(),
+        first: undefined,
+        last: undefined,
+        agent: undefined,
+        model: undefined,
+        warned: false,
+        blocked: false,
+        limit: undefined,
+        extra: 0,
+      };
       sessions.set(id, s);
     }
     return s;
   };
 
   const recompute = (s) => {
-    let total = 0;
-    for (const c of s.messages.values()) total += c;
-    s.cost = total;
+    let cost = 0;
+    const tok = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
+    const models = new Set();
+    for (const m of s.messages.values()) {
+      cost += m.cost || 0;
+      const t = m.tokens;
+      if (t) {
+        tok.input += t.input || 0;
+        tok.output += t.output || 0;
+        tok.reasoning += t.reasoning || 0;
+        if (t.cache) {
+          tok.cacheRead += t.cache.read || 0;
+          tok.cacheWrite += t.cache.write || 0;
+        }
+      }
+      if (m.model) models.add(m.model);
+    }
+    s.cost = cost;
+    s.tokens = tok;
+    s.turnCount = s.messages.size;
+    s.models = models;
   };
 
   const applies = (agent) => anyMatch(cfg.agents, agent) && !anyMatch(cfg.exclude, agent);
@@ -187,14 +257,26 @@ export function createCostGuardController(cfg, client) {
 
   const isAskTool = (tool) => tool === "question" || String(tool).includes("cost_guard");
 
+  /** One-line why for a session (used by the extend tool). */
+  const describe = (sessionID) => explainCost(get(sessionID));
+
   const hooks = {
     event: async ({ event }) => {
       if (event.type === "message.updated") {
         const info = event.properties.info;
         if (info.role === "assistant") {
           const s = get(info.sessionID);
-          s.messages.set(info.id, typeof info.cost === "number" ? info.cost : 0);
+          s.messages.set(info.id, {
+            cost: typeof info.cost === "number" ? info.cost : 0,
+            tokens: info.tokens || null,
+            model: info.modelID ? `${info.providerID}/${info.modelID}` : null,
+          });
           if (info.modelID) s.model = `${info.providerID}/${info.modelID}`;
+          const created = info.time && info.time.created;
+          if (created) {
+            s.first = s.first == null ? created : Math.min(s.first, created);
+            s.last = s.last == null ? created : Math.max(s.last, created);
+          }
           recompute(s);
           await overLimit(info.sessionID);
         }
@@ -220,6 +302,7 @@ export function createCostGuardController(cfg, client) {
             sessionID: input.sessionID,
             agent: s.agent,
             cost: s.cost,
+            why: explainCost(s),
           });
         }
       }
@@ -239,13 +322,14 @@ export function createCostGuardController(cfg, client) {
             tool: input.tool,
             agent: s.agent,
             cost: s.cost,
+            why: explainCost(s),
           });
         }
         throw new Error(
           `cost-guard: session cost ${s.cost.toFixed(2)} USD exceeded limit ${s.limit} USD` +
             `${s.agent ? ` (agent ${s.agent})` : ""}. Ask the user with the \`question\` tool whether to` +
             ` continue; if approved, call \`cost_guard_extend\` (optionally {"usd": <amount>}) and resume;` +
-            ` otherwise stop.`,
+            ` otherwise stop.\n${explainCost(s)}`,
         );
       }
 
@@ -254,17 +338,20 @@ export function createCostGuardController(cfg, client) {
         await log("error", `limit ${s.limit} USD exceeded; stopping tool calls`, {
           sessionID: input.sessionID,
           tool: input.tool,
+          agent: s.agent,
           cost: s.cost,
+          why: explainCost(s),
         });
       }
       throw new Error(
         `cost-guard: session cost ${s.cost.toFixed(2)} USD exceeded limit ${s.limit} USD` +
-          `${s.agent ? ` (agent ${s.agent})` : ""}. Raise the limit or switch to a cheaper model.`,
+          `${s.agent ? ` (agent ${s.agent})` : ""}. Raise the limit or switch to a cheaper model.\n` +
+          explainCost(s),
       );
     },
   };
 
-  return { hooks, extend };
+  return { hooks, extend, describe };
 }
 
 /** @returns {import("@opencode-ai/plugin").Hooks} */
@@ -272,10 +359,28 @@ export function createCostGuard(cfg, client) {
   return createCostGuardController(cfg, client).hooks;
 }
 
+/**
+ * Optional config file (for local installs, where the plugin tuple can't pass
+ * options): `~/.config/opencode/cost-guard.json` or `$OPENCODE_COST_GUARD_CONFIG`.
+ */
+async function loadFileOptions() {
+  try {
+    const fs = await import("node:fs/promises");
+    const p =
+      process.env.OPENCODE_COST_GUARD_CONFIG ||
+      (process.env.HOME ? `${process.env.HOME}/.config/opencode/cost-guard.json` : null);
+    if (!p) return null;
+    return JSON.parse(await fs.readFile(p, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
 /** @type {Plugin} */
 export const CostGuard = async ({ client }, options) => {
-  const cfg = normalizeOptions(options || {});
-  const { hooks, extend } = createCostGuardController(cfg, client);
+  const fileOptions = await loadFileOptions();
+  const cfg = normalizeOptions({ ...(fileOptions || {}), ...(options || {}) });
+  const { hooks, extend, describe } = createCostGuardController(cfg, client);
 
   if (cfg.onBlock === "ask") {
     try {
@@ -290,7 +395,7 @@ export const CostGuard = async ({ client }, options) => {
           },
           async execute(args, context) {
             const newLimit = extend(context.sessionID, args?.usd);
-            return `cost-guard: budget extended to ${newLimit.toFixed(2)} USD for this session.`;
+            return `cost-guard: budget extended to ${newLimit.toFixed(2)} USD for this session.\n${describe(context.sessionID)}`;
           },
         }),
       };

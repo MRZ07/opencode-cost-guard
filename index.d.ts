@@ -37,6 +37,17 @@ export interface ResolvedOptions {
 }
 
 export declare function globMatch(pattern: string, value: string): boolean;
+export declare function fmtNum(n: number): string;
+export declare function explainCost(s: {
+  cost: number;
+  limit?: number;
+  tokens?: { input: number; output: number; reasoning: number; cacheRead: number; cacheWrite: number };
+  turnCount?: number;
+  models?: Set<string> | string[];
+  first?: number;
+  last?: number;
+  agent?: string;
+}): string;
 export declare function parseLimits(raw: unknown, fallback?: number): { default: number; perAgent: Array<[string, number]> };
 export declare function resolveLimit(cfg: Pick<ResolvedOptions, "limit" | "limits">, agent?: string): number;
 export declare function normalizeOptions(options?: PluginOptions): ResolvedOptions;
@@ -47,7 +58,7 @@ export declare function createCostGuard(
 export declare function createCostGuardController(
   cfg: ResolvedOptions,
   client: { app: { log: (input: { body: Record<string, unknown> }) => Promise<unknown> } },
-): { hooks: Hooks; extend: (sessionID: string, usd?: number) => number };
+): { hooks: Hooks; extend: (sessionID: string, usd?: number) => number; describe: (sessionID: string) => string };
 
 export declare const CostGuard: Plugin;
 export default CostGuard;
