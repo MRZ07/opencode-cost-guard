@@ -4,17 +4,21 @@ Cap an opencode session's USD spend. Warn at a threshold, or block the session a
 
 ## Install
 
-npm, v1:
+Straight from GitHub — no npm publish needed. opencode installs it with Bun at startup.
+
+v1:
 
 ```jsonc
-"plugin": [["opencode-cost-guard", { "action": "block", "onBlock": "ask", "limit": 5 }]]
+"plugin": [["github:MRZ07/opencode-cost-guard", { "action": "block", "onBlock": "ask", "limit": 5 }]]
 ```
 
-npm, v2:
+v2:
 
 ```jsonc
-"plugins": [{ "package": "opencode-cost-guard", "options": { "action": "block", "onBlock": "ask", "limit": 5 } }]
+"plugins": [{ "package": "github:MRZ07/opencode-cost-guard", "options": { "action": "block", "onBlock": "ask", "limit": 5 } }]
 ```
+
+Pin a release with `github:MRZ07/opencode-cost-guard#v0.5.0`. The package exports only `CostGuard`, so opencode registers it once.
 
 Local install (both versions): copy `dist/opencode-cost-guard.js` into `~/.config/opencode/plugins/` and configure with `~/.config/opencode/cost-guard.json`:
 
