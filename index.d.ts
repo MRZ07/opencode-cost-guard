@@ -22,6 +22,18 @@ export interface CostGuardOptions extends PluginOptions {
   onBlock?: "stop" | "ask";
   /** Emit logs (errors always log). Default: true */
   notify?: boolean;
+  /** Total input + output + reasoning tokens per session. Opt-in. */
+  tokenLimit?: number;
+  /** Root run USD limit across descendants, including excluded agents. Opt-in. */
+  runLimit?: number;
+  /** Root run input + output + reasoning token limit. Opt-in. */
+  runTokenLimit?: number;
+  /** Enforce USD limits. Default: true */
+  usdEnabled?: boolean;
+  /** Persist normalized usage under project-isolated state storage. Default: true */
+  persist?: boolean;
+  /** Optional private state directory override. */
+  stateDirectory?: string;
 }
 
 export interface ResolvedOptions {
@@ -34,6 +46,12 @@ export interface ResolvedOptions {
   maxOutputTokensOnBlock: number;
   onBlock: "stop" | "ask";
   notify: boolean;
+  tokenLimit: number | null;
+  runLimit: number | null;
+  runTokenLimit: number | null;
+  usdEnabled: boolean;
+  persist: boolean;
+  stateDirectory: string | null;
 }
 
 export declare function globMatch(pattern: string, value: string): boolean;
@@ -58,7 +76,9 @@ export declare function createCostGuard(
 export declare function createCostGuardController(
   cfg: ResolvedOptions,
   client: { app: { log: (input: { body: Record<string, unknown> }) => Promise<unknown> } },
-): { hooks: Hooks; extend: (sessionID: string, usd?: number) => number; describe: (sessionID: string) => string };
+  projectDirectory?: string,
+  projectContext?: { projectKey?: string; instanceID?: string },
+): { hooks: Hooks; extend: (sessionID: string, usd?: number, tokens?: number, scope?: "session" | "run") => Promise<number | string>; describe: (sessionID: string) => string; ready: Promise<void>; refresh(): Promise<void>; _ledger(): object };
 
 export declare const CostGuard: Plugin;
 export default CostGuard;

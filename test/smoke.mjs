@@ -4,9 +4,11 @@ import {
   createCostGuardController,
   explainCost,
   fmtNum,
-  normalizeOptions,
+  normalizeOptions as rawNormalizeOptions,
   resolveLimit,
 } from "../lib.js";
+
+const normalizeOptions = (options = {}) => rawNormalizeOptions({ ...options, persist: false });
 
 const logs = [];
 const client = {
@@ -127,7 +129,7 @@ function assistantEvent(sessionID, id, cost, extra = {}) {
   await h["tool.execute.before"]({ tool: "cost_guard_extend", sessionID: "a" });
 
   // user approved -> extend, then work resumes
-  assert.equal(extend("a", 2), 3);
+  assert.equal(await extend("a", 2), 3);
   await h["tool.execute.before"]({ tool: "bash", sessionID: "a" });
 }
 

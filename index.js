@@ -8,6 +8,8 @@
  */
 import { z } from "zod";
 import { createCostGuardController, normalizeOptions } from "./lib.js";
+import { projectKey } from "./accounting.js";
+import { randomUUID } from "node:crypto";
 
 /** Optional config file for local installs, where the plugin tuple can't pass options. */
 async function loadFileOptions() {
@@ -24,23 +26,33 @@ async function loadFileOptions() {
 }
 
 /** @type {import("@opencode-ai/plugin").Plugin} */
-export const CostGuard = async ({ client }, options) => {
+export const CostGuard = async ({ client, directory }, options) => {
   const fileOptions = await loadFileOptions();
   const cfg = normalizeOptions({ ...(fileOptions || {}), ...(options || {}) });
-  const { hooks, extend, describe } = createCostGuardController(cfg, client);
+  const projectDirectory = directory?.worktree || directory?.project || directory || process.cwd();
+  const key = await projectKey(projectDirectory);
+  const controller = createCostGuardController(cfg, client, projectDirectory, { projectKey: key, instanceID: randomUUID() });
+  const { hooks, extend, describe } = controller;
+  hooks.config = async () => {
+    await controller.ready;
+    await controller.refresh();
+    await controller.publishConfig();
+  };
 
   if (cfg.onBlock === "ask") {
     hooks.tool = {
       cost_guard_extend: {
         description:
-          "Cost guard: grant extra USD to this session after the user approves continuing. " +
-          "Pass the amount the user granted; omit it to add one more limit.",
+          "Cost guard: after user approval, add USD and/or total tokens to the session or run budget. " +
+          "Without amounts, session scope extends the default USD limit (or token limit in token-only mode).",
         args: {
-          usd: z.number().positive().optional().describe("USD to add to the session limit (default: one more limit)"),
+          usd: z.number().positive().optional().describe("USD to add"),
+          tokens: z.number().int().positive().optional().describe("Total session/run tokens to add"),
+          scope: z.enum(["session", "run"]).optional().describe("Budget scope; default session"),
         },
         async execute(args, context) {
-          const limit = extend(context.sessionID, args?.usd);
-          return `cost-guard: session limit is now ${limit.toFixed(2)} USD.\n${describe(context.sessionID)}`;
+          const result = await extend(context.sessionID, args?.usd, args?.tokens, args?.scope || "session");
+          return `cost-guard: approved ${args?.scope || "session"} budget extension recorded (${result}).\n${describe(context.sessionID)}`;
         },
       },
     };

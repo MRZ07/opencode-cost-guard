@@ -1,4 +1,9 @@
 // node_modules/zod/v4/core/util.js
+function getEnumValues(entries) {
+  const numericValues = Object.values(entries).filter((v) => typeof v === "number");
+  const values = Object.entries(entries).filter(([k, _]) => numericValues.indexOf(+k) === -1).map(([_, v]) => v);
+  return values;
+}
 function joinValues(array, separator = "|") {
   return array.map((val) => stringifyPrimitive(val)).join(separator);
 }
@@ -73,6 +78,10 @@ function shallowClone(o) {
   if (o instanceof Set)
     return new Set(o);
   return o;
+}
+var propertyKeyTypes = /* @__PURE__ */ new Set(["string", "number", "symbol"]);
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 function clone(inst, def, params) {
   const cl = new inst._zod.constr(def ?? inst._zod.def);
@@ -1308,6 +1317,29 @@ function handleIntersectionResults(result, left, right) {
   result.value = merged.data;
   return result;
 }
+var $ZodEnum = /* @__PURE__ */ $constructor("$ZodEnum", (inst, def) => {
+  $ZodType.init(inst, def);
+  const values = getEnumValues(def.entries);
+  const valuesSet = new Set(values);
+  inst._zod.values = valuesSet;
+  defineLazyInternal(inst, "pattern", (zod) => {
+    const patternValues = getEnumValues(zod.def.entries).filter((k) => propertyKeyTypes.has(typeof k));
+    return new RegExp(patternValues.length ? `^(${patternValues.map((o) => escapeRegex(o.toString())).join("|")})$` : "^[^\\s\\S]$");
+  });
+  inst._zod.parse = (payload, _ctx) => {
+    const input = payload.value;
+    if (valuesSet.has(input)) {
+      return payload;
+    }
+    payload.issues.push({
+      code: "invalid_value",
+      values,
+      input,
+      inst
+    });
+    return payload;
+  };
+});
 var $ZodTransform = /* @__PURE__ */ $constructor("$ZodTransform", (inst, def) => {
   $ZodType.init(inst, def);
   inst._zod.optin = "optional";
@@ -2787,6 +2819,19 @@ var numberProcessor = (schema, ctx, _json, params) => {
       json.allOf = [...json.allOf ?? [], ...rest.map((m) => ({ multipleOf: m }))];
   }
 };
+var enumProcessor = (schema, _ctx, json, _params) => {
+  const def = schema._zod.def;
+  const values = getEnumValues(def.entries);
+  if (values.length === 0) {
+    json.not = {};
+    return;
+  }
+  if (values.every((v) => typeof v === "number"))
+    json.type = "number";
+  if (values.every((v) => typeof v === "string"))
+    json.type = "string";
+  json.enum = values;
+};
 var customProcessor = (schema, ctx, json, params) => {
   handleUnrepresentable(schema, ctx, json, params, "Custom types cannot be represented in JSON Schema");
 };
@@ -3291,6 +3336,52 @@ function intersection(left, right) {
     right
   });
 }
+var ZodEnum = /* @__PURE__ */ $constructor("ZodEnum", (inst, def) => {
+  $ZodEnum.init(inst, def);
+  ZodType.init(inst, def);
+  inst._zod.processJSONSchema = (ctx, json, params) => enumProcessor(inst, ctx, json, params);
+  inst.enum = def.entries;
+  inst.options = [...inst._zod.values];
+  const keys = new Set(Object.keys(def.entries));
+  inst.extract = (values, params) => {
+    const newEntries = {};
+    for (const value of values) {
+      if (keys.has(value)) {
+        newEntries[value] = def.entries[value];
+      } else
+        throw new Error(`Key ${value} not found in enum`);
+    }
+    return new ZodEnum({
+      ...def,
+      checks: [],
+      ...normalizeParams(params),
+      entries: newEntries
+    });
+  };
+  inst.exclude = (values, params) => {
+    const newEntries = { ...def.entries };
+    for (const value of values) {
+      if (keys.has(value)) {
+        delete newEntries[value];
+      } else
+        throw new Error(`Key ${value} not found in enum`);
+    }
+    return new ZodEnum({
+      ...def,
+      checks: [],
+      ...normalizeParams(params),
+      entries: newEntries
+    });
+  };
+});
+function _enum(values, params) {
+  const entries = Array.isArray(values) ? Object.fromEntries(values.map((v) => [v, v])) : values;
+  return new ZodEnum({
+    type: "enum",
+    entries,
+    ...normalizeParams(params)
+  });
+}
 var ZodTransform = /* @__PURE__ */ $constructor("ZodTransform", (inst, def) => {
   _ensureDefaultMemoizer();
   $ZodTransform.init(inst, def);
@@ -3463,12 +3554,477 @@ function superRefine(fn, params) {
   return _superRefine(fn, params);
 }
 // lib.js
-function globMatch(pattern, value) {
-  if (pattern === "*" || pattern === value)
-    return true;
-  const re = new RegExp("^" + pattern.split("").map((c) => c === "*" ? ".*" : c === "?" ? "." : c.replace(/[.+^${}()|[\]\\]/g, "\\$&")).join("") + "$");
-  return re.test(value);
+import os2 from "node:os";
+import { randomUUID as randomUUID2 } from "node:crypto";
+
+// accounting.js
+import fs from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
+import { createHash, randomUUID } from "node:crypto";
+var STATE_VERSION = 1;
+var JOURNAL_VERSION = 1;
+var MAX_STATE_BYTES = 8 * 1024 * 1024;
+var MAX_JOURNAL_RECORDS = 1e5;
+var MAX_JOURNAL_BYTES = 64 * 1024 * 1024;
+var CONFIG_LEASE_MS = 5 * 60000;
+var finite = (n) => typeof n === "number" && Number.isFinite(n) && n >= 0;
+function normalizeUsage(info = {}) {
+  const t = info.tokens || {};
+  const fields = [t.input, t.output, t.reasoning, t.cache?.read, t.cache?.write];
+  const tokens = {
+    input: finite(fields[0]) ? fields[0] : 0,
+    output: finite(fields[1]) ? fields[1] : 0,
+    reasoning: finite(fields[2]) ? fields[2] : 0,
+    cacheRead: finite(fields[3]) ? fields[3] : 0,
+    cacheWrite: finite(fields[4]) ? fields[4] : 0
+  };
+  return {
+    cost: finite(info.cost) ? info.cost : 0,
+    costKnown: finite(info.cost),
+    tokens,
+    tokensComplete: fields.every(finite),
+    budgetTokens: tokens.input + tokens.output + tokens.reasoning
+  };
 }
+function newLedger() {
+  return { version: STATE_VERSION, messages: {}, sessions: {}, approvals: [], configs: [] };
+}
+function messageKey(sessionID, id) {
+  return `${encodeURIComponent(sessionID)}:${encodeURIComponent(id)}`;
+}
+var versionValue = (record) => record.updatedAt ?? record.revision ?? null;
+var sourceRank = (record) => record.recovered ? 0 : 1;
+var receiptOrder = (a, b) => (a.receivedAt ?? a.timestamp ?? 0) - (b.receivedAt ?? b.timestamp ?? 0) || String(a.writerID || "").localeCompare(String(b.writerID || "")) || (a.writerSeq ?? 0) - (b.writerSeq ?? 0) || String(a.eventID || "").localeCompare(String(b.eventID || ""));
+var candidatesOf = (record) => record ? record.candidates || [record] : [];
+var uniqueCandidates = (records) => {
+  const byID = new Map;
+  for (const record of records.flatMap(candidatesOf)) {
+    const id = record.eventID || JSON.stringify(record);
+    const prior = byID.get(id);
+    if (!prior || JSON.stringify(record) < JSON.stringify(prior))
+      byID.set(id, record);
+  }
+  return [...byID.values()];
+};
+var winner = (records) => {
+  const candidates = uniqueCandidates(records);
+  const live = candidates.filter((record) => sourceRank(record) === 1);
+  const eligible = live.length ? live : candidates;
+  const kinds = new Set(eligible.map((record) => record.versionKind));
+  const comparable = eligible.every((record) => versionValue(record) != null) && kinds.size === 1 && !kinds.has(null);
+  const selected = [...eligible].sort((a, b) => {
+    if (comparable && versionValue(a) !== versionValue(b))
+      return versionValue(a) < versionValue(b) ? -1 : 1;
+    return receiptOrder(a, b);
+  }).at(-1);
+  return { ...selected, candidates };
+};
+function recordMessage(ledger, info, { recovered = false, receivedAt = Date.now(), writerID = "local", writerSeq, eventID = randomUUID() } = {}) {
+  if (!info || typeof info.sessionID !== "string" || !info.sessionID || typeof info.id !== "string" || !info.id)
+    return false;
+  writerSeq ??= Math.max(0, ...Object.values(ledger.messages).flatMap(candidatesOf).filter((record) => record.writerID === writerID).map((record) => record.writerSeq || 0)) + 1;
+  const record = {
+    sessionID: info.sessionID,
+    id: info.id,
+    usage: normalizeUsage(info),
+    mode: typeof info.mode === "string" ? info.mode : null,
+    model: info.providerID && info.modelID ? `${info.providerID}/${info.modelID}` : null,
+    createdAt: Number.isFinite(info.time?.created) ? info.time.created : null,
+    updatedAt: Number.isFinite(info.time?.updated) ? info.time.updated : null,
+    revision: Number.isFinite(info.revision) ? info.revision : null,
+    versionKind: Number.isFinite(info.time?.updated) ? "updated" : Number.isFinite(info.revision) ? "revision" : null,
+    receivedAt,
+    writerID,
+    writerSeq,
+    eventID,
+    recovered
+  };
+  return mergeRecord(ledger, record);
+}
+function mergeRecord(target, incoming) {
+  const key = messageKey(incoming.sessionID, incoming.id);
+  const prior = target.messages[key];
+  target.messages[key] = winner([...prior ? [prior] : [], incoming]);
+  return target.messages[key].eventID === incoming.eventID;
+}
+function recordSession(ledger, info, event = {}) {
+  if (!info || typeof info.id !== "string" || !info.id)
+    return;
+  const prior = ledger.sessions[info.id] || { parentID: null, startAt: null, metadata: {} };
+  const timestamp = Number.isFinite(info.time?.updated) ? info.time.updated : Number.isFinite(info.time?.created) ? info.time.created : event.receivedAt ?? Date.now();
+  const fields = {};
+  if (Object.hasOwn(info, "parentID"))
+    fields.parentID = info.parentID;
+  if (Number.isFinite(info.time?.created))
+    fields.startAt = info.time.created;
+  for (const field of ["projectID", "directory"])
+    if (Object.hasOwn(info, field) && typeof info[field] === "string")
+      fields[field] = info[field];
+  const candidates = uniqueCandidates([
+    ...prior.candidates || [],
+    {
+      fields,
+      timestamp,
+      receivedAt: event.receivedAt ?? Date.now(),
+      publishedAt: event.publishedAt ?? Date.now(),
+      updatedAt: Number.isFinite(info.time?.updated) ? info.time.updated : null,
+      revision: Number.isFinite(info.revision) ? info.revision : null,
+      versionKind: Number.isFinite(info.time?.updated) ? "updated" : Number.isFinite(info.revision) ? "revision" : null,
+      writerID: event.writerID || "local",
+      writerSeq: event.writerSeq || 0,
+      eventID: event.eventID || randomUUID()
+    }
+  ]);
+  ledger.sessions[info.id] = { ...prior, metadata: { ...prior.metadata }, candidates };
+  for (const field of new Set(candidates.flatMap((candidate) => Object.keys(candidate.fields || {})))) {
+    const selected = winner(candidates.filter((candidate) => Object.hasOwn(candidate.fields || {}, field)));
+    if (selected)
+      ledger.sessions[info.id][field] = selected.fields[field];
+  }
+  ledger.sessions[info.id].candidates = candidates;
+}
+function tombstoneSession(ledger, id, event = {}) {
+  if (typeof id !== "string" || !id)
+    return;
+  (ledger.tombstones ||= []).push({ id, timestamp: event.timestamp ?? Date.now(), writerID: event.writerID || "local", eventID: event.eventID || randomUUID() });
+}
+function addApproval(ledger, approval) {
+  if (approval && typeof approval.id === "string" && approval.id && !ledger.approvals.some((item) => item.id === approval.id))
+    ledger.approvals.push(approval);
+}
+function addConfig(ledger, config) {
+  if (config && typeof config.eventID === "string" && !ledger.configs.some((item) => item.eventID === config.eventID))
+    ledger.configs.push(config);
+}
+function hasChanges(delta) {
+  return Object.keys(delta.messages || {}).length > 0 || Object.keys(delta.sessions || {}).length > 0 || (delta.approvals || []).length > 0 || (delta.configs || []).length > 0 || (delta.tombstones || []).length > 0 || delta.budget != null;
+}
+function normalizeLedger(input) {
+  const ledger = newLedger();
+  if (!input)
+    return ledger;
+  if (input.version !== STATE_VERSION)
+    throw new Error("accounting state has an unsupported schema");
+  const groups = new Map;
+  for (const record of Object.values(input.messages || {})) {
+    const key = messageKey(record.sessionID, record.id);
+    const list = groups.get(key) || [];
+    list.push(...candidatesOf(record));
+    groups.set(key, list);
+  }
+  for (const [key, records] of groups)
+    ledger.messages[key] = winner(records);
+  for (const [id, old] of Object.entries(input.sessions || {})) {
+    const candidates = old.candidates || [{ fields: { parentID: old.parentID, startAt: old.startAt }, timestamp: old.timestamp ?? 0, writerID: old.writerID || "legacy", eventID: old.eventID || `legacy:${id}` }];
+    const fields = {};
+    const fieldNames = [...new Set(candidates.flatMap((candidate) => Object.keys(candidate.fields || {})))];
+    for (const name of fieldNames) {
+      const selected = winner(candidates.filter((candidate) => Object.hasOwn(candidate.fields || {}, name)));
+      if (selected)
+        fields[name] = selected.fields[name];
+    }
+    const unique = uniqueCandidates(candidates), resolved = {};
+    for (const field of new Set(unique.flatMap((candidate) => Object.keys(candidate.fields || {})))) {
+      const selected = winner(unique.filter((candidate) => Object.hasOwn(candidate.fields || {}, field)));
+      if (selected)
+        resolved[field] = selected.fields[field];
+    }
+    ledger.sessions[id] = { parentID: null, startAt: null, metadata: {}, ...resolved, candidates: unique.sort(receiptOrder) };
+  }
+  ledger.approvals = [...input.approvals || []];
+  ledger.configs = [...input.configs || []];
+  ledger.tombstones = [...input.tombstones || []];
+  ledger.budget = input.budget || null;
+  return ledger;
+}
+function mergeLedger(...sources) {
+  const ledger = newLedger(), msgs = new Map, sessions = {}, approvals = new Map, configs = new Map, tombstones = new Map;
+  for (const source of sources) {
+    if (!source)
+      continue;
+    for (const record of Object.values(source.messages || {})) {
+      const key = messageKey(record.sessionID, record.id);
+      (msgs.get(key) || msgs.set(key, []).get(key)).push(record);
+    }
+    for (const [id, data] of Object.entries(source.sessions || {})) {
+      sessions[id] ||= { candidates: [] };
+      sessions[id].candidates.push(...data.candidates || [{ fields: { parentID: data.parentID, startAt: data.startAt }, timestamp: 0, writerID: "legacy", eventID: `legacy:${id}` }]);
+    }
+    for (const item of source.approvals || [])
+      approvals.set(item.eventID || item.id, item);
+    for (const item of source.configs || [])
+      configs.set(item.eventID, item);
+    for (const item of source.tombstones || [])
+      tombstones.set(item.eventID, item);
+  }
+  for (const [key, records] of msgs)
+    ledger.messages[key] = winner(records);
+  for (const [id, data] of Object.entries(sessions)) {
+    const fields = {};
+    const names = [...new Set(data.candidates.flatMap((candidate) => Object.keys(candidate.fields || {})))];
+    for (const name of names) {
+      const selected = winner(data.candidates.filter((candidate) => Object.hasOwn(candidate.fields || {}, name)));
+      if (selected)
+        fields[name] = selected.fields[name];
+    }
+    const candidates = uniqueCandidates(data.candidates), resolved = {};
+    for (const field of new Set(candidates.flatMap((candidate) => Object.keys(candidate.fields || {})))) {
+      const selected = winner(candidates.filter((candidate) => Object.hasOwn(candidate.fields || {}, field)));
+      if (selected)
+        resolved[field] = selected.fields[field];
+    }
+    ledger.sessions[id] = { parentID: null, startAt: null, metadata: {}, ...resolved, candidates: candidates.sort(receiptOrder) };
+  }
+  ledger.approvals = [...approvals.values()].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  ledger.configs = [...configs.values()].sort((a, b) => a.eventID.localeCompare(b.eventID));
+  ledger.tombstones = [...tombstones.values()].sort((a, b) => a.eventID.localeCompare(b.eventID));
+  for (const record of Object.values(ledger.messages))
+    if (Number.isFinite(record.createdAt)) {
+      const session = ledger.sessions[record.sessionID] ||= { parentID: null, startAt: null, metadata: {}, candidates: [] };
+      session.startAt = session.startAt == null ? record.createdAt : Math.min(session.startAt, record.createdAt);
+    }
+  return ledger;
+}
+function deltaLedger(before, after) {
+  const delta = newLedger();
+  for (const [key, value] of Object.entries(after.messages || {})) {
+    const seen = new Set(candidatesOf(before.messages?.[key]).map((candidate) => candidate.eventID));
+    const additions = candidatesOf(value).filter((candidate) => !seen.has(candidate.eventID));
+    if (additions.length)
+      delta.messages[key] = { ...winner(additions), candidates: additions };
+  }
+  for (const [id, session] of Object.entries(after.sessions || {})) {
+    const previous = before.sessions?.[id];
+    const priorEvents = new Set((previous?.candidates || []).map((candidate) => candidate.eventID));
+    const additions = (session.candidates || []).filter((candidate) => !priorEvents.has(candidate.eventID));
+    if (additions.length)
+      delta.sessions[id] = { parentID: null, startAt: null, metadata: {}, candidates: additions };
+    else if (!previous && !session.candidates?.length)
+      delta.sessions[id] = session;
+  }
+  delta.approvals = (after.approvals || []).filter((item) => !(before.approvals || []).some((prior) => (prior.eventID || prior.id) === (item.eventID || item.id)));
+  delta.configs = (after.configs || []).filter((item) => !(before.configs || []).some((prior) => prior.eventID === item.eventID));
+  delta.tombstones = (after.tombstones || []).filter((item) => !(before.tombstones || []).some((prior) => prior.eventID === item.eventID));
+  if (JSON.stringify(before.budget) !== JSON.stringify(after.budget))
+    delta.budget = after.budget;
+  return delta;
+}
+function aggregate(ledger, sessionIDs) {
+  const ids = new Set(sessionIDs), out = {
+    cost: 0,
+    costKnownLowerBound: 0,
+    costAvailable: true,
+    tokensComplete: true,
+    input: 0,
+    output: 0,
+    reasoning: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    turns: 0,
+    first: null,
+    last: null,
+    models: new Set
+  };
+  const normalized = normalizeLedger(ledger);
+  for (const record of Object.values(normalized.messages))
+    if (ids.has(record.sessionID)) {
+      out.turns++;
+      out.costAvailable &&= record.usage.costKnown;
+      if (record.usage.costKnown)
+        out.cost += record.usage.cost;
+      out.tokensComplete &&= record.usage.tokensComplete;
+      out.input += record.usage.tokens.input;
+      out.output += record.usage.tokens.output;
+      out.reasoning += record.usage.tokens.reasoning;
+      out.cacheRead += record.usage.tokens.cacheRead;
+      out.cacheWrite += record.usage.tokens.cacheWrite;
+      out.totalTokens += record.usage.budgetTokens;
+      if (record.createdAt != null) {
+        out.first = out.first == null ? record.createdAt : Math.min(out.first, record.createdAt);
+        out.last = out.last == null ? record.createdAt : Math.max(out.last, record.createdAt);
+      }
+      if (record.model)
+        out.models.add(record.model);
+    }
+  out.costKnownLowerBound = out.cost;
+  return out;
+}
+function descendants(ledger, root) {
+  const value = normalizeLedger(ledger), result = [], seen = new Set, stack = [root];
+  while (stack.length) {
+    const id = stack.pop();
+    if (seen.has(id))
+      continue;
+    seen.add(id);
+    result.push(id);
+    for (const [child, session] of Object.entries(value.sessions))
+      if (session.parentID === id && !seen.has(child))
+        stack.push(child);
+  }
+  return result;
+}
+function canonicalRoot(ledger, id) {
+  const value = normalizeLedger(ledger), seen = new Set;
+  let current = id;
+  while (value.sessions[current]?.parentID) {
+    if (seen.has(current))
+      return { id: current, complete: false };
+    seen.add(current);
+    current = value.sessions[current].parentID;
+  }
+  return { id: current, complete: !seen.has(current) };
+}
+function effectiveBudgetLimits(config, { agent, sessionID, rootID, approvals = [] }) {
+  const matches = (pattern) => agent == null ? pattern === "*" : globMatch(pattern, agent);
+  const resolve = (fallback, perAgent) => {
+    for (const [pattern, value] of perAgent || [])
+      if (matches(pattern))
+        return value;
+    return fallback;
+  };
+  const applies = !(config.exclude || []).some(matches) && (!(config.agents || []).length || (config.agents || []).some(matches));
+  const extra = (scope, id, key) => approvals.filter((item) => item.scope === scope && item.sessionID === id).flatMap((item) => item.dimensions || []).reduce((sum, dimension) => sum + (dimension[key] || 0), 0);
+  const usd = config.usdEnabled === false || !applies ? null : resolve(config.sessionLimit, config.limits);
+  const tokens = !applies || !Number.isFinite(config.tokenLimit) ? null : config.tokenLimit;
+  const sessionExtensionUsd = extra("session", sessionID, "usd"), sessionExtensionTokens = extra("session", sessionID, "tokens");
+  const runExtensionUsd = extra("run", rootID, "usd"), runExtensionTokens = extra("run", rootID, "tokens");
+  return {
+    applies,
+    excluded: (config.exclude || []).some(matches),
+    sessionExtensionUsd,
+    sessionExtensionTokens,
+    runExtensionUsd,
+    runExtensionTokens,
+    sessionUsdLimit: usd == null ? null : usd + sessionExtensionUsd,
+    sessionTokenLimit: tokens == null ? null : tokens + sessionExtensionTokens,
+    runUsdLimit: config.usdEnabled === false || !Number.isFinite(config.runLimit) ? null : config.runLimit + runExtensionUsd,
+    runTokenLimit: !Number.isFinite(config.runTokenLimit) ? null : config.runTokenLimit + runExtensionTokens
+  };
+}
+function globMatch(pattern, value) {
+  if (typeof pattern !== "string" || typeof value !== "string")
+    return false;
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+  return new RegExp(`^${escaped}$`).test(value);
+}
+async function projectKey(projectDirectory = process.cwd()) {
+  try {
+    return createHash("sha256").update(await fs.realpath(projectDirectory)).digest("hex").slice(0, 24);
+  } catch (error) {
+    throw new Error(`cannot resolve OpenCode project directory ${projectDirectory}: ${error.message}`, { cause: error });
+  }
+}
+async function defaultStateDirectory(projectDirectory = process.cwd()) {
+  return path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "opencode-accounting", await projectKey(projectDirectory));
+}
+async function ensureDirectory(directory) {
+  await fs.mkdir(directory, { recursive: true, mode: 448 });
+  await fs.chmod(directory, 448);
+}
+function serializeRecord(record) {
+  const text = JSON.stringify(record);
+  if (Buffer.byteLength(text) > MAX_STATE_BYTES)
+    throw new Error("accounting journal event exceeds 8 MiB");
+  return text;
+}
+async function createStore({ directory, filename, projectDirectory = process.cwd(), persist = true, publication = {} }) {
+  const project = await projectKey(projectDirectory), base = directory || await defaultStateDirectory(projectDirectory);
+  const journalDir = path.join(base, `${project}-${filename}.journal`);
+  const legacyFile = path.join(base, `${project}-${filename}`);
+  if (persist)
+    await ensureDirectory(journalDir);
+  const read = async () => {
+    if (!persist)
+      return newLedger();
+    const names = await fs.readdir(journalDir).catch((error) => {
+      if (error.code === "ENOENT")
+        return [];
+      throw error;
+    });
+    const events = names.filter((name) => name.endsWith(".event")).sort();
+    if (events.length > MAX_JOURNAL_RECORDS)
+      throw new Error(`accounting journal exceeds ${MAX_JOURNAL_RECORDS} events; usage is incomplete`);
+    let bytes = 0;
+    const ledgers = [];
+    try {
+      const legacyStat = await fs.stat(legacyFile);
+      if (legacyStat.size > MAX_STATE_BYTES)
+        throw new Error("legacy accounting snapshot exceeds 8 MiB");
+      ledgers.push(normalizeLedger(JSON.parse(await fs.readFile(legacyFile, "utf8"))));
+    } catch (error) {
+      if (error.code !== "ENOENT")
+        throw new Error(`cannot import legacy snapshot ${legacyFile}: ${error.message}`, { cause: error });
+    }
+    for (const name of events) {
+      const file = path.join(journalDir, name), stat = await fs.stat(file);
+      bytes += stat.size;
+      if (bytes > MAX_JOURNAL_BYTES)
+        throw new Error(`accounting journal exceeds ${MAX_JOURNAL_BYTES} bytes; usage is incomplete`);
+      let event;
+      try {
+        event = JSON.parse(await fs.readFile(file, "utf8"));
+      } catch (error) {
+        throw new Error(`invalid journal event ${name}: ${error.message}`, { cause: error });
+      }
+      if (event.version !== JOURNAL_VERSION || !event.payload || typeof event.eventID !== "string")
+        throw new Error(`invalid journal event schema: ${name}`);
+      ledgers.push(event.payload);
+    }
+    return mergeLedger(...ledgers);
+  };
+  return {
+    file: journalDir,
+    load: read,
+    replaceFromDisk: read,
+    async append(event) {
+      if (!persist)
+        return;
+      const eventID = event.eventID || randomUUID(), name = `${eventID}-${randomUUID()}.event`, final = path.join(journalDir, name);
+      const temporary = path.join(journalDir, `.${eventID}.${process.pid}.${randomUUID()}.tmp`), content = serializeRecord({ version: JOURNAL_VERSION, eventID, payload: event.payload });
+      try {
+        await fs.writeFile(temporary, content, { mode: 384, flag: "wx" });
+        await publication.beforeRename?.({ temporary, final });
+        await fs.rename(temporary, final);
+        await publication.afterRename?.({ final });
+      } catch (error) {
+        await fs.unlink(temporary).catch(() => {});
+        if (error.code !== "EEXIST")
+          throw error;
+      }
+    },
+    async update(mutation) {
+      if (!persist)
+        return newLedger();
+      if (typeof mutation !== "function") {
+        await this.append(mutation);
+        return read();
+      }
+      const before = await read();
+      const draft = mergeLedger(before);
+      await mutation(draft);
+      for (const session of Object.values(draft.sessions))
+        delete session.title;
+      const delta = deltaLedger(before, draft);
+      if (hasChanges(delta))
+        await this.append({ payload: delta });
+      return read();
+    },
+    async merge(local) {
+      if (!persist)
+        return local;
+      const before = await read();
+      const after = mergeLedger(before, normalizeLedger(local));
+      const delta = deltaLedger(before, after);
+      if (hasChanges(delta))
+        await this.append({ payload: delta });
+      return read();
+    }
+  };
+}
+
+// lib.js
 function anyMatch(patterns, value) {
   if (!patterns || patterns.length === 0)
     return false;
@@ -3554,12 +4110,133 @@ function normalizeOptions(options = {}) {
     exclude: Array.isArray(options.exclude) ? options.exclude.map(String) : [],
     maxOutputTokensOnBlock: typeof options.maxOutputTokensOnBlock === "number" && options.maxOutputTokensOnBlock >= 1 ? options.maxOutputTokensOnBlock : 1,
     onBlock: options.onBlock === "ask" ? "ask" : "stop",
-    notify: options.notify !== false
+    notify: options.notify !== false,
+    tokenLimit: Number.isSafeInteger(options.tokenLimit) && options.tokenLimit > 0 ? options.tokenLimit : null,
+    runLimit: Number.isFinite(options.runLimit) && options.runLimit > 0 ? options.runLimit : null,
+    runTokenLimit: Number.isSafeInteger(options.runTokenLimit) && options.runTokenLimit > 0 ? options.runTokenLimit : null,
+    usdEnabled: options.usdEnabled !== false,
+    persist: options.persist !== false,
+    stateDirectory: typeof options.stateDirectory === "string" ? options.stateDirectory : null
   };
   return cfg;
 }
-function createCostGuardController(cfg, client) {
+function createCostGuardController(cfg, client, projectDirectory, projectContext = {}) {
   const sessions = new Map;
+  let ledger = newLedger();
+  let storePromise = cfg.persist ? createStore({ directory: cfg.stateDirectory, filename: "cost-guard.json", projectDirectory }) : Promise.resolve(null);
+  let writeQueue = Promise.resolve();
+  let writerSeq = 0;
+  const ready = storePromise.then(async (store) => {
+    if (store)
+      ledger = await store.load();
+  });
+  let recoveredSessions = new Map;
+  const enqueue = (mutation) => {
+    writeQueue = writeQueue.then(async () => {
+      await ready;
+      const store = await storePromise;
+      if (store) {
+        const eventID = randomUUID2();
+        const before = await store.load();
+        ledger = before;
+        const draft = mergeLedger(before);
+        const returned = mutation(draft, eventID);
+        const changed = returned && returned.version ? mergeLedger(draft, returned) : draft;
+        const delta = deltaLedger(before, changed);
+        if (hasChanges(delta))
+          await store.append({ eventID, payload: delta });
+        ledger = changed;
+      } else {
+        const returned = mutation(ledger, randomUUID2());
+        if (returned && returned.version)
+          ledger = returned;
+      }
+    });
+    return writeQueue;
+  };
+  const ensureRecovered = async (sessionID) => {
+    if (recoveredSessions.has(sessionID))
+      return recoveredSessions.get(sessionID);
+    const recovery = (async () => {
+      await ready;
+      if (typeof client?.session?.messages !== "function")
+        return;
+      try {
+        const response = await client.session.messages({ path: { id: sessionID }, query: { limit: 500 } });
+        const entries = response?.data ?? response;
+        if (!Array.isArray(entries) || entries.length >= 500)
+          return;
+        const recovered = newLedger();
+        for (const entry of entries) {
+          const info = entry?.info;
+          if (info?.role === "assistant")
+            recordMessage(recovered, { ...info, sessionID: info.sessionID || sessionID }, { recovered: true, writerID: projectContext.instanceID || `${process.pid}` });
+        }
+        await enqueue((current) => mergeLedger(current, recovered));
+      } catch {}
+    })();
+    recoveredSessions.set(sessionID, recovery);
+    return recovery;
+  };
+  const refresh = async () => {
+    await ready;
+    writeQueue = writeQueue.then(async () => {
+      const store = await storePromise;
+      if (store)
+        ledger = await store.replaceFromDisk();
+    });
+    await writeQueue;
+  };
+  let generation = 0;
+  const budgetSnapshot = () => ({
+    schema: "opencode-cost-guard-budget-v1",
+    version: 1,
+    projectKey: null,
+    sessionLimit: cfg.limit,
+    limits: cfg.limits,
+    agents: cfg.agents,
+    exclude: cfg.exclude,
+    tokenLimit: cfg.tokenLimit,
+    runLimit: cfg.runLimit,
+    runTokenLimit: cfg.runTokenLimit,
+    usdEnabled: cfg.usdEnabled
+  });
+  const publishConfig = async () => {
+    if (!cfg.persist)
+      return;
+    const instanceID = projectContext.instanceID || `${os2.hostname()}:${process.pid}`;
+    const config = budgetSnapshot();
+    const fingerprint = JSON.stringify({ ...config, approvals: undefined });
+    const eventID = randomUUID2();
+    const leaseEvent = {
+      eventID,
+      projectKey: projectContext.projectKey,
+      instanceID,
+      pid: process.pid,
+      hostname: os2.hostname(),
+      generation: ++generation,
+      fingerprint,
+      config,
+      publishedAt: Date.now()
+    };
+    await enqueue((current) => addConfig(current, leaseEvent));
+  };
+  const setBudget = async (budget) => enqueue((current) => {
+    current.budget = { ...budget, approvals: current.approvals };
+  });
+  const sessionTotals = (id) => aggregate(ledger, [id]);
+  const approved = (id, scope) => {
+    const target = scope === "run" ? canonicalRoot(ledger, id).id : id;
+    return ledger.approvals.reduce((sum, item) => {
+      if (item.scope !== scope || item.sessionID !== target)
+        return sum;
+      for (const dimension of item.dimensions || []) {
+        sum.usd += dimension.usd || 0;
+        sum.tokens += dimension.tokens || 0;
+      }
+      return sum;
+    }, { usd: 0, tokens: 0 });
+  };
   const get = (id) => {
     let s = sessions.get(id);
     if (!s) {
@@ -3582,29 +4259,30 @@ function createCostGuardController(cfg, client) {
     }
     return s;
   };
-  const recompute = (s) => {
-    let cost = 0;
-    const tok = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
-    const models = new Set;
-    for (const m of s.messages.values()) {
-      cost += m.cost || 0;
-      const t = m.tokens;
-      if (t) {
-        tok.input += t.input || 0;
-        tok.output += t.output || 0;
-        tok.reasoning += t.reasoning || 0;
-        if (t.cache) {
-          tok.cacheRead += t.cache.read || 0;
-          tok.cacheWrite += t.cache.write || 0;
-        }
+  const refreshSession = (id) => {
+    const session = get(id);
+    const totals = aggregate(ledger, [id]);
+    session.cost = totals.cost;
+    session.tokens = {
+      input: totals.input,
+      output: totals.output,
+      reasoning: totals.reasoning,
+      cacheRead: totals.cacheRead,
+      cacheWrite: totals.cacheWrite
+    };
+    session.turnCount = totals.turns;
+    session.models = totals.models;
+    session.messages.clear();
+    for (const record of Object.values(ledger.messages))
+      if (record.sessionID === id) {
+        session.messages.set(record.id, { cost: record.usage.cost, tokens: {
+          input: record.usage.tokens.input,
+          output: record.usage.tokens.output,
+          reasoning: record.usage.tokens.reasoning,
+          cache: { read: record.usage.tokens.cacheRead, write: record.usage.tokens.cacheWrite }
+        }, model: record.model });
       }
-      if (m.model)
-        models.add(m.model);
-    }
-    s.cost = cost;
-    s.tokens = tok;
-    s.turnCount = s.messages.size;
-    s.models = models;
+    return session;
   };
   const applies = (agent) => anyMatch(cfg.agents, agent) && !anyMatch(cfg.exclude, agent);
   const log = async (level, message, extra) => {
@@ -3615,54 +4293,98 @@ function createCostGuardController(cfg, client) {
     } catch {}
   };
   const overLimit = async (sessionID) => {
-    const s = get(sessionID);
-    if (!applies(s.agent))
-      return false;
-    const limit = resolveLimit(cfg, s.agent) + (s.extra || 0);
+    const s = refreshSession(sessionID);
+    const enforceSession = applies(s.agent);
+    const effective = effectiveBudgetLimits({
+      sessionLimit: cfg.limit,
+      limits: cfg.limits,
+      agents: cfg.agents,
+      exclude: cfg.exclude,
+      tokenLimit: cfg.tokenLimit,
+      runLimit: cfg.runLimit,
+      runTokenLimit: cfg.runTokenLimit,
+      usdEnabled: cfg.usdEnabled
+    }, { agent: s.agent || "?", sessionID, rootID: canonicalRoot(ledger, sessionID).id, approvals: ledger.approvals });
+    const limit = effective.sessionUsdLimit ?? resolveLimit(cfg, s.agent);
     s.limit = limit;
-    if (s.cost >= limit)
+    const totals = sessionTotals(sessionID);
+    s.cost = totals.cost ?? 0;
+    s.tokens = { input: totals.input, output: totals.output, reasoning: totals.reasoning, cacheRead: totals.cacheRead, cacheWrite: totals.cacheWrite };
+    const tokenLimit = effective.sessionTokenLimit;
+    const usageOver = enforceSession && (cfg.usdEnabled && effective.sessionUsdLimit != null && totals.cost >= effective.sessionUsdLimit || tokenLimit != null && totals.totalTokens >= tokenLimit);
+    const root = canonicalRoot(ledger, sessionID);
+    const run = aggregate(ledger, descendants(ledger, root.id));
+    const runLimit = effective.runUsdLimit;
+    const runTokenLimit = effective.runTokenLimit;
+    const runOver = root.complete && (runLimit != null && run.cost >= runLimit || runTokenLimit != null && run.totalTokens >= runTokenLimit);
+    if (usageOver || runOver)
       return true;
-    if (!s.warned && s.cost >= limit * cfg.warnRatio) {
+    if (s.blocked)
+      s.blocked = false;
+    const threshold = cfg.usdEnabled && effective.sessionUsdLimit != null && totals.cost >= effective.sessionUsdLimit * cfg.warnRatio || tokenLimit != null && totals.totalTokens >= tokenLimit * cfg.warnRatio || runLimit != null && run.cost >= runLimit * cfg.warnRatio || runTokenLimit != null && run.totalTokens >= runTokenLimit * cfg.warnRatio;
+    if (!threshold && s.warned)
+      s.warned = false;
+    if (!s.warned && threshold) {
       s.warned = true;
-      await log("warn", `cost ${s.cost.toFixed(2)} USD reached ${Math.round(cfg.warnRatio * 100)}% of limit ${limit}` + `${s.agent ? ` (agent ${s.agent})` : ""}`, { sessionID, agent: s.agent, cost: s.cost, limit });
+      await log("warn", `usage reached ${Math.round(cfg.warnRatio * 100)}% of a configured budget` + `${s.agent ? ` (agent ${s.agent})` : ""}`, { sessionID, agent: s.agent, cost: totals.cost, limit, totalTokens: totals.totalTokens });
     }
     return false;
   };
-  const extend = (sessionID, usd) => {
-    const s = get(sessionID);
-    const base = resolveLimit(cfg, s.agent);
-    const add = Number.isFinite(usd) && usd > 0 ? usd : base;
-    s.extra = (s.extra || 0) + add;
-    s.limit = base + s.extra;
+  const extend = async (sessionID, usd, tokens, scope = "session") => {
+    await refresh();
+    const s = refreshSession(sessionID);
+    const root = scope === "run" ? canonicalRoot(ledger, sessionID).id : sessionID;
+    const dimensions = [];
+    if (usd != null) {
+      if (!cfg.usdEnabled || (scope === "run" ? cfg.runLimit == null : false))
+        throw new Error(`cost-guard: ${scope} USD budget is not active`);
+      if (!Number.isFinite(usd) || usd <= 0)
+        throw new Error("cost-guard: USD extension must be positive");
+      dimensions.push({ usd });
+    }
+    if (tokens != null) {
+      if (!Number.isSafeInteger(tokens) || tokens <= 0 || (scope === "run" ? cfg.runTokenLimit == null : cfg.tokenLimit == null))
+        throw new Error(`cost-guard: ${scope} token budget is not active or extension is invalid`);
+      dimensions.push({ tokens });
+    }
+    if (!dimensions.length) {
+      if (scope === "run")
+        throw new Error("cost-guard: specify a USD and/or token amount for a run extension");
+      if (!cfg.usdEnabled && cfg.tokenLimit != null)
+        dimensions.push({ tokens: cfg.tokenLimit });
+      else if (cfg.usdEnabled)
+        dimensions.push({ usd: resolveLimit(cfg, s.agent) });
+      else
+        throw new Error("cost-guard: no active budget dimension to extend");
+    }
+    const approval = { id: `${process.pid}:${Date.now()}:${Math.random()}`, scope, sessionID: root, dimensions, createdAt: Date.now() };
+    await enqueue((current, eventID) => addApproval(current, { ...approval, id: eventID, eventID }));
     s.blocked = false;
     s.warned = false;
-    return s.limit;
+    return scope === "run" ? root : resolveLimit(cfg, s.agent) + approved(sessionID, "session").usd;
   };
   const isAskTool = (tool) => tool === "question" || String(tool).includes("cost_guard");
   const describe = (sessionID) => explainCost(get(sessionID));
   const hooks = {
     event: async ({ event }) => {
+      await ready;
       if (event.type === "message.updated") {
         const info = event.properties.info;
         if (info.role === "assistant") {
-          const s = get(info.sessionID);
-          s.messages.set(info.id, {
-            cost: typeof info.cost === "number" ? info.cost : 0,
-            tokens: info.tokens || null,
-            model: info.modelID ? `${info.providerID}/${info.modelID}` : null
-          });
-          if (info.modelID)
-            s.model = `${info.providerID}/${info.modelID}`;
-          const created = info.time && info.time.created;
-          if (created) {
-            s.first = s.first == null ? created : Math.min(s.first, created);
-            s.last = s.last == null ? created : Math.max(s.last, created);
-          }
-          recompute(s);
+          await ensureRecovered(info.sessionID);
+          await enqueue((current, eventID) => recordMessage(current, info, { eventID, writerID: projectContext.instanceID || `${process.pid}`, writerSeq: ++writerSeq }));
+          await publishConfig();
+          const s = refreshSession(info.sessionID);
           await overLimit(info.sessionID);
         }
+      } else if (event.type === "session.created" || event.type === "session.updated") {
+        await enqueue((current, eventID) => {
+          recordSession(current, event.properties.info, { eventID, writerID: projectContext.instanceID || `${process.pid}`, writerSeq: ++writerSeq });
+        });
       } else if (event.type === "session.deleted") {
-        sessions.delete(event.properties.info.id);
+        await enqueue((current, eventID) => {
+          tombstoneSession(current, event.properties.info.id, { eventID, writerID: projectContext.instanceID || `${process.pid}` });
+        });
       }
     },
     "chat.message": async (input) => {
@@ -3671,12 +4393,13 @@ function createCostGuardController(cfg, client) {
         s.agent = input.agent;
     },
     "chat.params": async (input, output) => {
-      const s = get(input.sessionID);
+      await refresh();
+      const s = refreshSession(input.sessionID);
       if (input.agent)
         s.agent = input.agent;
       const over = await overLimit(input.sessionID);
       if (over && cfg.action === "block" && cfg.onBlock === "stop") {
-        output.maxOutputTokens = cfg.maxOutputTokensOnBlock;
+        output.maxOutputTokens = Math.min(output.maxOutputTokens || Infinity, cfg.maxOutputTokensOnBlock);
         if (!s.blocked) {
           s.blocked = true;
           await log("error", `limit ${s.limit} USD exceeded; capping output`, {
@@ -3689,7 +4412,8 @@ function createCostGuardController(cfg, client) {
       }
     },
     "tool.execute.before": async (input) => {
-      const s = get(input.sessionID);
+      await refresh();
+      const s = refreshSession(input.sessionID);
       const over = await overLimit(input.sessionID);
       if (!over || cfg.action !== "block")
         return;
@@ -3706,7 +4430,7 @@ function createCostGuardController(cfg, client) {
             why: explainCost(s)
           });
         }
-        throw new Error(`cost-guard: session cost ${s.cost.toFixed(2)} USD exceeded limit ${s.limit} USD` + `${s.agent ? ` (agent ${s.agent})` : ""}. Ask the user with the \`question\` tool whether to` + ` continue and how much extra USD to grant, then call \`cost_guard_extend\` with` + ` {"usd": <amount>} and resume; otherwise stop.
+        throw new Error(`cost-guard: session usage exceeded an active budget` + `${s.agent ? ` (agent ${s.agent})` : ""}. Ask the user with the \`question\` tool whether to` + ` continue and how much extra USD or tokens to grant, then call \`cost_guard_extend\` and resume; otherwise stop.
 ${explainCost(s)}`);
       }
       if (!s.blocked) {
@@ -3719,14 +4443,19 @@ ${explainCost(s)}`);
           why: explainCost(s)
         });
       }
-      throw new Error(`cost-guard: session cost ${s.cost.toFixed(2)} USD exceeded limit ${s.limit} USD` + `${s.agent ? ` (agent ${s.agent})` : ""}. Raise the limit or switch to a cheaper model.
+      throw new Error(`cost-guard: session or run usage exceeded an active budget` + `${s.agent ? ` (agent ${s.agent})` : ""}. Raise the limit or switch to a cheaper model.
 ` + explainCost(s));
+    },
+    "session.idle": async () => {
+      await refresh();
+      await publishConfig();
     }
   };
-  return { hooks, extend, describe };
+  return { hooks, extend, describe, ready, refresh, publishConfig, _ledger: () => ledger, _store: () => storePromise, budgetSnapshot, setBudget };
 }
 
 // index.js
+import { randomUUID as randomUUID3 } from "node:crypto";
 async function loadFileOptions() {
   try {
     const fs = await import("node:fs/promises");
@@ -3738,20 +4467,30 @@ async function loadFileOptions() {
     return null;
   }
 }
-var CostGuard = async ({ client }, options) => {
+var CostGuard = async ({ client, directory }, options) => {
   const fileOptions = await loadFileOptions();
   const cfg = normalizeOptions({ ...fileOptions || {}, ...options || {} });
-  const { hooks, extend, describe } = createCostGuardController(cfg, client);
+  const projectDirectory = directory?.worktree || directory?.project || directory || process.cwd();
+  const key = await projectKey(projectDirectory);
+  const controller = createCostGuardController(cfg, client, projectDirectory, { projectKey: key, instanceID: randomUUID3() });
+  const { hooks, extend, describe } = controller;
+  hooks.config = async () => {
+    await controller.ready;
+    await controller.refresh();
+    await controller.publishConfig();
+  };
   if (cfg.onBlock === "ask") {
     hooks.tool = {
       cost_guard_extend: {
-        description: "Cost guard: grant extra USD to this session after the user approves continuing. Pass the amount the user granted; omit it to add one more limit.",
+        description: "Cost guard: after user approval, add USD and/or total tokens to the session or run budget. Without amounts, session scope extends the default USD limit (or token limit in token-only mode).",
         args: {
-          usd: number2().positive().optional().describe("USD to add to the session limit (default: one more limit)")
+          usd: number2().positive().optional().describe("USD to add"),
+          tokens: number2().int().positive().optional().describe("Total session/run tokens to add"),
+          scope: _enum(["session", "run"]).optional().describe("Budget scope; default session")
         },
         async execute(args, context) {
-          const limit = extend(context.sessionID, args?.usd);
-          return `cost-guard: session limit is now ${limit.toFixed(2)} USD.
+          const result = await extend(context.sessionID, args?.usd, args?.tokens, args?.scope || "session");
+          return `cost-guard: approved ${args?.scope || "session"} budget extension recorded (${result}).
 ${describe(context.sessionID)}`;
         }
       }

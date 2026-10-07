@@ -39,6 +39,12 @@ Explicit options win over the config file; env vars win over both.
 | `agents` / `exclude` | `["*"]` / `[]` | agent globs to enforce or skip |
 | `maxOutputTokensOnBlock` | `1` | output cap once blocked |
 | `notify` | `true` | emit logs |
+| `tokenLimit` | unset | session budget tokens: input + output + reasoning (cache excluded) |
+| `runLimit` | unset | USD cap across the root session and all descendants |
+| `runTokenLimit` | unset | run-wide input + output + reasoning token cap |
+| `usdEnabled` | `true` | enable USD enforcement; tokens still enforce independently |
+| `persist` | `true` | persist normalized usage/ancestry/approvals across restart |
+| `stateDirectory` | project-isolated default | optional private directory override |
 
 Env: `OPENCODE_COST_GUARD_LIMIT`, `OPENCODE_COST_GUARD_ACTION`, `OPENCODE_COST_GUARD_CONFIG`.
 
@@ -57,6 +63,14 @@ cost-guard: session limit is now 13.00 USD.
 ```
 
 `question` and `cost_guard_extend` stay callable while blocked. Omit the amount to add one more limit.
+
+`tokenLimit` and `runTokenLimit` are positive-integer opt-ins; totals count input + output + reasoning, not cache-read/write. A threshold blocks at `usage >= limit`. `cost_guard_extend` accepts `usd`, `tokens`, and `scope` (`session` by default or `run`). Run extensions affect only the canonical root's explicitly named run dimension; they never change session caps. Run extensions require an explicit amount. In USD-disabled token-only mode, omitting the session extension amount adds one configured session token limit. Approvals are recorded separately and survive corrected telemetry.
+
+The `stop` mode caps future generated output at the smaller of the existing provider cap and `maxOutputTokensOnBlock`; it cannot undo dispatched requests or cap input/reasoning on every provider. The practical `ask` mode leaves generation uncapped so the agent can ask for approval; it enforces at the tool boundary and is not strict generation cancellation. Usage updates can race across concurrent in-flight calls and overshoot; telemetry is not a billing guarantee.
+
+Token counts are OpenCode telemetry. Incomplete USD records contribute no fabricated cost, but known costs remain a lower bound and can still trigger a cap; below the cap, unknown usage is never treated as safe. Unknown USD does not disable token checks. Persistent state contains normalized usage, IDs, ancestry, timestamps, and approvals only—no prompts or session titles. Project/worktree-keyed immutable journal events publish through unique temporary files and atomic rename; readers ignore leftovers. Replay is idempotent and permutation-invariant. Journal limits fail explicitly; this release does not compact/delete history. `persist: false` performs no persistence. Active configuration visibility uses per-instance five-minute leases; cross-process aggregate enforcement remains non-transactional. Existing installs and global config are untouched: source edits do not update installed pinned plugin versions. Install a future release or build/copy the local bundle, then restart OpenCode.
+
+Journal events contain only newly published message/session candidates, approvals, or configuration changes; they do not republish cumulative ledger snapshots. Agent selectors retain full glob behavior (`*` anywhere and single-character `?`).
 
 Every block, warn, and extend reports why:
 

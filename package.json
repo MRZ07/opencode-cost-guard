@@ -11,9 +11,9 @@
       "types": "./index.d.ts"
     }
   },
-  "files": ["index.js", "lib.js", "index.d.ts", "dist", "README.md", "LICENSE"],
+  "files": ["index.js", "lib.js", "accounting.js", "index.d.ts", "dist", "README.md", "LICENSE", "test"],
   "scripts": {
-    "test": "node test/smoke.mjs",
+    "test": "node test/smoke.mjs && node test/accounting.mjs",
     "build:local": "node build-local.mjs"
   },
   "keywords": ["opencode", "opencode-plugin", "cost", "budget", "guard", "llm"],
