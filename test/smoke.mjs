@@ -207,6 +207,33 @@ function assistantEvent(sessionID, id, cost, extra = {}) {
   await h["tool.execute.before"]({ tool: "bash", sessionID: "s1" }); // must NOT throw in warn mode
 }
 
+// Large usage jumps still cross and warn once; a downward revision rearms the threshold.
+{
+  logs.length = 0;
+  const h = createCostGuard(normalizeOptions({ limit: 1, action: "warn", warnRatio: 0.8 }), client);
+  const usage = (cost, updated) => assistantEvent("overshoot", "same-message", cost, { time: { updated } });
+  await h.event(usage(1.2, 1));
+  assert.equal(logs.filter((entry) => entry.level === "warn").length, 1, "crossing above the cap warns immediately");
+  await h.event(usage(1.2, 1));
+  assert.equal(logs.filter((entry) => entry.level === "warn").length, 1, "unchanged telemetry does not duplicate a warning");
+  await h.event(usage(0.7, 2));
+  await h.event(usage(1.2, 3));
+  assert.equal(logs.filter((entry) => entry.level === "warn").length, 2, "dropping below threshold rearms warning");
+
+  logs.length = 0;
+  const tokenGuard = createCostGuard(normalizeOptions({ limit: 5, tokenLimit: 100, warnRatio: 0.8 }), client);
+  const tokenUse = (tokens, updated) => assistantEvent("token-overshoot", "same-message", 0.2,
+    { tokens: { input: tokens, output: 0, reasoning: 0 }, time: { updated } });
+  await tokenGuard.event(tokenUse(125, 1));
+  await tokenGuard.event(tokenUse(70, 2));
+  await tokenGuard.event(tokenUse(125, 3));
+  assert.equal(logs.filter((entry) => entry.level === "warn").length, 2, "token thresholds warn across overshoot and rearm");
+
+  const blocked = createCostGuard(normalizeOptions({ limit: 1, action: "block", onBlock: "ask" }), client);
+  await blocked.event(assistantEvent("still-blocked", "jump", 1.2));
+  await assert.rejects(() => blocked["tool.execute.before"]({ tool: "bash", sessionID: "still-blocked" }), /active budget/);
+}
+
 // 3. block action: throws on tool call, caps output
 {
   const cfg = normalizeOptions({ limit: 5, action: "block" });

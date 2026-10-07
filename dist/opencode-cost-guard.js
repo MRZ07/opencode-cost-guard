@@ -5611,10 +5611,6 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
     const runLimit = effective.runUsdLimit;
     const runTokenLimit = effective.runTokenLimit;
     const runOver = root.complete && (runLimit != null && run.cost >= runLimit || runTokenLimit != null && run.totalTokens >= runTokenLimit);
-    if (usageOver || runOver)
-      return true;
-    if (s.blocked)
-      s.blocked = false;
     const threshold = cfg.usdEnabled && effective.sessionUsdLimit != null && totals.cost >= effective.sessionUsdLimit * cfg.warnRatio || effective.sessionTokenLimit != null && totals.totalTokens >= effective.sessionTokenLimit * cfg.warnRatio || runLimit != null && run.cost >= runLimit * cfg.warnRatio || runTokenLimit != null && run.totalTokens >= runTokenLimit * cfg.warnRatio;
     if (!threshold && s.warned)
       s.warned = false;
@@ -5622,6 +5618,10 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
       s.warned = true;
       await log("warn", `usage reached ${Math.round(cfg.warnRatio * 100)}% of a configured budget` + `${s.agent ? ` (agent ${s.agent})` : ""}`, { sessionID, agent: s.agent, cost: totals.cost, limit, totalTokens: totals.totalTokens });
     }
+    if (usageOver || runOver)
+      return true;
+    if (s.blocked)
+      s.blocked = false;
     return false;
   };
   const extend = async (callerSessionID, usd, tokens, scope = "session", targetSessionID = callerSessionID) => {

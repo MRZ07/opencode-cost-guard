@@ -387,10 +387,8 @@ export function createCostGuardController(cfg, client, projectDirectory, project
     const run = aggregate(ledger, descendants(ledger, root.id));
     const runLimit = effective.runUsdLimit;
     const runTokenLimit = effective.runTokenLimit;
-      const runOver = root.complete && ((runLimit != null && run.cost >= runLimit) ||
+    const runOver = root.complete && ((runLimit != null && run.cost >= runLimit) ||
       (runTokenLimit != null && run.totalTokens >= runTokenLimit));
-    if (usageOver || runOver) return true;
-    if (s.blocked) s.blocked = false;
     const threshold = (cfg.usdEnabled && effective.sessionUsdLimit != null && totals.cost >= effective.sessionUsdLimit * cfg.warnRatio) ||
       (effective.sessionTokenLimit != null && totals.totalTokens >= effective.sessionTokenLimit * cfg.warnRatio) ||
       (runLimit != null && run.cost >= runLimit * cfg.warnRatio) ||
@@ -405,6 +403,8 @@ export function createCostGuardController(cfg, client, projectDirectory, project
         { sessionID, agent: s.agent, cost: totals.cost, limit, totalTokens: totals.totalTokens },
       );
     }
+    if (usageOver || runOver) return true;
+    if (s.blocked) s.blocked = false;
     return false;
   };
 
