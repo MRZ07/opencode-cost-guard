@@ -24,6 +24,8 @@ export interface CostGuardOptions extends PluginOptions {
   notify?: boolean;
   /** Total input + output + reasoning tokens per session. Opt-in. */
   tokenLimit?: number;
+  /** Lifetime input + output + reasoning cap for each verified child session instance; root exempt, session totals include repeated context, cache excluded. Opt-in. */
+  subagentTokenLimit?: number;
   /** Root run USD limit across descendants, including excluded agents. Opt-in. */
   runLimit?: number;
   /** Root run input + output + reasoning token limit. Opt-in. */
@@ -47,6 +49,7 @@ export interface ResolvedOptions {
   onBlock: "stop" | "ask";
   notify: boolean;
   tokenLimit: number | null;
+  subagentTokenLimit: number | null;
   runLimit: number | null;
   runTokenLimit: number | null;
   usdEnabled: boolean;
@@ -78,7 +81,7 @@ export declare function createCostGuardController(
   client: { app: { log: (input: { body: Record<string, unknown> }) => Promise<unknown> } },
   projectDirectory?: string,
   projectContext?: { projectKey?: string; instanceID?: string },
-): { hooks: Hooks; extend: (sessionID: string, usd?: number, tokens?: number, scope?: "session" | "run") => Promise<number | string>; describe: (sessionID: string) => string; ready: Promise<void>; refresh(): Promise<void>; _ledger(): object };
+): { hooks: Hooks; extend: (sessionID: string, usd?: number, tokens?: number, scope?: "session" | "run", targetSessionID?: string) => Promise<number | string>; describe: (sessionID: string) => string; ready: Promise<void>; refresh(): Promise<void>; recoverAncestry(sessionID: string): Promise<{ complete: boolean; id: string; reason?: string }>; ingestSession(info: Record<string, unknown>): Promise<void>; _ledger(): object };
 
 export declare const CostGuard: Plugin;
 export default CostGuard;

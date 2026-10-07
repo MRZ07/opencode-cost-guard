@@ -43,16 +43,40 @@ export const CostGuard = async ({ client, directory }, options) => {
     hooks.tool = {
       cost_guard_extend: {
         description:
-          "Cost guard: after user approval, add USD and/or total tokens to the session or run budget. " +
-          "Without amounts, session scope extends the default USD limit (or token limit in token-only mode).",
+          "Cost guard: after explicit user approval, add USD and/or total tokens to the session or run budget. " +
+          "Without amounts, session scope retains the default USD extension; token-only mode adds one active base token limit.",
         args: {
           usd: z.number().positive().optional().describe("USD to add"),
           tokens: z.number().int().positive().optional().describe("Total session/run tokens to add"),
           scope: z.enum(["session", "run"]).optional().describe("Budget scope; default session"),
+          sessionID: z.string().min(1).max(256).optional().describe("Optional verified child session target; requires canonical parent authority"),
         },
         async execute(args, context) {
-          const result = await extend(context.sessionID, args?.usd, args?.tokens, args?.scope || "session");
-          return `cost-guard: approved ${args?.scope || "session"} budget extension recorded (${result}).\n${describe(context.sessionID)}`;
+          const requested = args?.sessionID || context.sessionID;
+          let callerMetadata, targetMetadata;
+          if (requested !== context.sessionID) {
+            const [caller, target] = await Promise.all([
+              client.session?.get?.({ path: { id: context.sessionID } }),
+              client.session?.get?.({ path: { id: requested } }),
+            ]);
+            const valid = (result, id) => result && !result.error && result.data?.id === id &&
+              typeof result.data.directory === "string" && typeof result.data.projectID === "string";
+            if (!valid(caller, context.sessionID) || !valid(target, requested) ||
+              await projectKey(caller.data.directory) !== await projectKey(projectDirectory) ||
+              await projectKey(target.data.directory) !== await projectKey(projectDirectory))
+              throw new Error("cost-guard: child extension requires successful same-project caller/target metadata");
+            if (caller.data.projectID !== target.data.projectID) throw new Error("cost-guard: caller and child session project IDs do not match");
+            callerMetadata = caller.data;
+            targetMetadata = target.data;
+          }
+          await controller.ready;
+          if (requested !== context.sessionID) {
+            await controller.ingestSession(callerMetadata);
+            await controller.ingestSession(targetMetadata);
+            await controller.recoverAncestry(requested);
+          }
+          const result = await extend(context.sessionID, args?.usd, args?.tokens, args?.scope || "session", requested);
+          return `cost-guard: approved ${args?.scope || "session"} budget extension recorded for ${requested} (${result}).\n${describe(requested)}`;
         },
       },
     };

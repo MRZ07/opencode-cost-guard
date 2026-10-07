@@ -48,6 +48,9 @@ function mergeDefs(...defs) {
   }
   return Object.defineProperties({}, mergedDescriptors);
 }
+function slugify(input) {
+  return input.toLowerCase().trim().replace(/[^\w\s-]/g, "").replace(/[\s_-]+/g, "-").replace(/^-+|-+$/g, "");
+}
 var captureStackTrace = "captureStackTrace" in Error ? Error.captureStackTrace : (..._args) => {};
 function isObject(data) {
   return typeof data === "object" && data !== null && !Array.isArray(data);
@@ -710,9 +713,60 @@ var _safeDecodeAsync = (_Err) => async (schema, value, _ctx) => {
   return _safeParseAsync(_Err)(schema, value, _ctx);
 };
 // node_modules/zod/v4/core/regexes.js
+var cuid = /^[cC][0-9a-z]{6,}$/;
+var cuid2 = /^[0-9a-z]+$/;
+var ulid = /^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$/;
+var xid = /^[0-9a-vA-V]{20}$/;
+var ksuid = /^[A-Za-z0-9]{27}$/;
+var nanoid = /^[a-zA-Z0-9_-]{21}$/;
+function nanoidOfLength(length) {
+  return new RegExp(`^[a-zA-Z0-9_-]{${length}}$`);
+}
+var duration = /^P(?:(\d+W)|(?!.*W)(?=\d|T\d)(\d+Y)?(\d+M)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+([.,]\d+)?S)?)?)$/;
+var guid = /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
+var uuid = (version) => {
+  if (!version)
+    return /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/;
+  return new RegExp(`^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-${version}[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$`);
+};
+var email = /^(?:[A-Za-z0-9_'+\-]+\.)*[A-Za-z0-9_'+\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$/;
+var _emoji = `^(?=[\\s\\S]*[\\p{Extended_Pictographic}\\p{Regional_Indicator}\\u20E3])[\\p{Extended_Pictographic}\\p{Emoji_Component}]+$`;
+function emoji() {
+  return new RegExp(_emoji, "u");
+}
+var ipv4 = /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])$/;
+var ipv6 = /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$/;
+var cidrv4 = /^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\/([0-9]|[1-2][0-9]|3[0-2])$/;
+var cidrv6 = /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))\/(12[0-8]|1[01][0-9]|[1-9]?[0-9])$/;
 var base64 = /^$|^(?:[0-9a-zA-Z+/]{4})*(?:(?:[0-9a-zA-Z+/]{2}==)|(?:[0-9a-zA-Z+/]{3}=))?$/;
 var base64url = /^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2,3})?$/;
+var httpProtocol = /^https?$/;
+var e164 = /^\+[1-9]\d{6,14}$/;
+var dateSource = `(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))`;
+function anchor(source) {
+  return new RegExp(`^${source}$`);
+}
+var date = /* @__PURE__ */ anchor(dateSource);
+function timeSource(args) {
+  const hhmm = `(?:[01]\\d|2[0-3]):[0-5]\\d`;
+  const regex = typeof args.precision === "number" ? args.precision === -1 ? `${hhmm}` : args.precision === 0 ? `${hhmm}:[0-5]\\d` : `${hhmm}:[0-5]\\d\\.\\d{${args.precision}}` : args.seconds ? `${hhmm}:[0-5]\\d(?:\\.\\d+)?` : `${hhmm}(?::[0-5]\\d(?:\\.\\d+)?)?`;
+  return regex;
+}
+function time(args) {
+  return new RegExp(`^${timeSource(args)}$`);
+}
+function datetime(args) {
+  const opts = ["Z"];
+  if (args.offset)
+    opts.push(`([+-](?:[01]\\d|2[0-3]):[0-5]\\d)`);
+  const qualified = `${timeSource({ precision: args.precision, seconds: true })}(?:${opts.join("|")})`;
+  const timeRegex = args.local ? `${qualified}|${timeSource({ precision: args.precision })}` : qualified;
+  return new RegExp(`^${dateSource}T(?:${timeRegex})$`);
+}
+var anyString = /^[\s\S]{0,}$/;
 var number = /^-?\d+(?:\.\d+)?$/;
+var lowercase = /^[^A-Z]*$/;
+var uppercase = /^[^a-z]*$/;
 
 // node_modules/zod/v4/core/checks.js
 var $ZodCheck = /* @__PURE__ */ $constructor("$ZodCheck", (inst, def) => {
@@ -922,6 +976,107 @@ var $ZodCheckLengthEquals = /* @__PURE__ */ $constructor("$ZodCheckLengthEquals"
     });
   };
 });
+var $ZodCheckStringFormat = /* @__PURE__ */ $constructor("$ZodCheckStringFormat", (inst, def) => {
+  var _a, _b;
+  $ZodCheck.init(inst, def);
+  if (def.pattern)
+    (_a = inst._zod).check ?? (_a.check = (payload) => {
+      def.pattern.lastIndex = 0;
+      if (def.pattern.test(payload.value))
+        return;
+      payload.issues.push({
+        origin: "string",
+        code: "invalid_format",
+        format: def.format,
+        input: payload.value,
+        ...def.pattern ? { pattern: def.pattern.toString() } : {},
+        inst,
+        continue: !def.abort
+      });
+    });
+  else
+    (_b = inst._zod).check ?? (_b.check = () => {});
+});
+var $ZodCheckRegex = /* @__PURE__ */ $constructor("$ZodCheckRegex", (inst, def) => {
+  $ZodCheckStringFormat.init(inst, def);
+  inst._zod.check = (payload) => {
+    def.pattern.lastIndex = 0;
+    if (def.pattern.test(payload.value))
+      return;
+    payload.issues.push({
+      origin: "string",
+      code: "invalid_format",
+      format: "regex",
+      input: payload.value,
+      pattern: def.pattern.toString(),
+      inst,
+      continue: !def.abort
+    });
+  };
+});
+var $ZodCheckLowerCase = /* @__PURE__ */ $constructor("$ZodCheckLowerCase", (inst, def) => {
+  def.pattern ?? (def.pattern = lowercase);
+  $ZodCheckStringFormat.init(inst, def);
+});
+var $ZodCheckUpperCase = /* @__PURE__ */ $constructor("$ZodCheckUpperCase", (inst, def) => {
+  def.pattern ?? (def.pattern = uppercase);
+  $ZodCheckStringFormat.init(inst, def);
+});
+var $ZodCheckIncludes = /* @__PURE__ */ $constructor("$ZodCheckIncludes", (inst, def) => {
+  $ZodCheck.init(inst, def);
+  const escapedRegex = escapeRegex(def.includes);
+  const pattern = new RegExp(typeof def.position === "number" ? `^.{${def.position},}${escapedRegex}` : escapedRegex);
+  def.pattern = pattern;
+  inst._zod.check = (payload) => {
+    if (payload.value.includes(def.includes, def.position))
+      return;
+    payload.issues.push({
+      origin: "string",
+      code: "invalid_format",
+      format: "includes",
+      includes: def.includes,
+      input: payload.value,
+      inst,
+      continue: !def.abort
+    });
+  };
+});
+var $ZodCheckStartsWith = /* @__PURE__ */ $constructor("$ZodCheckStartsWith", (inst, def) => {
+  $ZodCheck.init(inst, def);
+  const pattern = new RegExp(`^${escapeRegex(def.prefix)}.*`);
+  def.pattern ?? (def.pattern = pattern);
+  inst._zod.check = (payload) => {
+    if (payload.value.startsWith(def.prefix))
+      return;
+    payload.issues.push({
+      origin: "string",
+      code: "invalid_format",
+      format: "starts_with",
+      prefix: def.prefix,
+      input: payload.value,
+      inst,
+      continue: !def.abort
+    });
+  };
+});
+var $ZodCheckEndsWith = /* @__PURE__ */ $constructor("$ZodCheckEndsWith", (inst, def) => {
+  $ZodCheck.init(inst, def);
+  const pattern = new RegExp(`.*${escapeRegex(def.suffix)}$`);
+  def.pattern ?? (def.pattern = pattern);
+  inst._zod.check = (payload) => {
+    if (payload.value.endsWith(def.suffix))
+      return;
+    payload.issues.push({
+      origin: "string",
+      code: "invalid_format",
+      format: "ends_with",
+      suffix: def.suffix,
+      input: payload.value,
+      inst,
+      continue: !def.abort
+    });
+  };
+});
 var $ZodCheckOverwrite = /* @__PURE__ */ $constructor("$ZodCheckOverwrite", (inst, def) => {
   $ZodCheck.init(inst, def);
   inst._zod.check = (payload) => {
@@ -1065,8 +1220,363 @@ function standardProps(inst) {
     version: 1
   };
 }
+var $ZodString = /* @__PURE__ */ $constructor("$ZodString", (inst, def) => {
+  $ZodType.init(inst, def);
+  inst._zod.pattern = def.pattern ?? anyString;
+  inst._zod.parse = (payload, _) => {
+    if (def.coerce)
+      try {
+        payload.value = String(payload.value);
+      } catch (_) {}
+    if (typeof payload.value === "string")
+      return payload;
+    payload.issues.push({
+      expected: "string",
+      code: "invalid_type",
+      input: payload.value,
+      inst
+    });
+    return payload;
+  };
+});
+var $ZodStringFormat = /* @__PURE__ */ $constructor("$ZodStringFormat", (inst, def) => {
+  $ZodCheckStringFormat.init(inst, def);
+  $ZodString.init(inst, def);
+});
+var $ZodGUID = /* @__PURE__ */ $constructor("$ZodGUID", (inst, def) => {
+  def.pattern ?? (def.pattern = guid);
+  $ZodStringFormat.init(inst, def);
+});
+var $ZodUUID = /* @__PURE__ */ $constructor("$ZodUUID", (inst, def) => {
+  if (def.version) {
+    const versionMap = {
+      v1: 1,
+      v2: 2,
+      v3: 3,
+      v4: 4,
+      v5: 5,
+      v6: 6,
+      v7: 7,
+      v8: 8
+    };
+    const v = versionMap[def.version];
+    if (v === undefined)
+      throw new Error(`Invalid UUID version: "${def.version}"`);
+    def.pattern ?? (def.pattern = uuid(v));
+  } else
+    def.pattern ?? (def.pattern = uuid());
+  $ZodStringFormat.init(inst, def);
+});
+var $ZodEmail = /* @__PURE__ */ $constructor("$ZodEmail", (inst, def) => {
+  def.pattern ?? (def.pattern = email);
+  $ZodStringFormat.init(inst, def);
+});
+var URL_BAD_FORMAT = 1;
+var URL_UNPARSEABLE = 2;
+function canParseURL(input) {
+  try {
+    if (typeof URL !== "undefined" && typeof URL.canParse === "function")
+      return URL.canParse(input);
+    new URL(input);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function validateURL(trimmed, def) {
+  if (!("normalize" in def) && !("hostname" in def) && !("protocol" in def)) {
+    return canParseURL(trimmed) || URL_UNPARSEABLE;
+  }
+  return parseURLObject(trimmed, def);
+}
+function parseURLObject(trimmed, def) {
+  if (!def.normalize && def.protocol?.source === httpProtocol.source && !/^https?:\/\//i.test(trimmed)) {
+    return URL_BAD_FORMAT;
+  }
+  try {
+    if (typeof URL !== "undefined") {
+      const URLStatic = URL;
+      if (typeof URLStatic.parse === "function")
+        return URLStatic.parse(trimmed) ?? URL_UNPARSEABLE;
+    }
+    return new URL(trimmed);
+  } catch {
+    return URL_UNPARSEABLE;
+  }
+}
+var asciiTabOrNewline = /[\t\n\r]/g;
+function stripTabAndNewline(value) {
+  return value.replace(asciiTabOrNewline, "");
+}
+function urlHostnameOk(url, hostname) {
+  hostname.lastIndex = 0;
+  return hostname.test(url.hostname);
+}
+function urlProtocolOk(url, protocol) {
+  protocol.lastIndex = 0;
+  return protocol.test(url.protocol.endsWith(":") ? url.protocol.slice(0, -1) : url.protocol);
+}
+var $ZodURL = /* @__PURE__ */ $constructor("$ZodURL", (inst, def) => {
+  $ZodStringFormat.init(inst, def);
+  inst._zod.check = (payload) => {
+    try {
+      const trimmed = payload.value.trim();
+      const url = validateURL(trimmed, def);
+      if (url === URL_BAD_FORMAT) {
+        payload.issues.push({
+          code: "invalid_format",
+          format: "url",
+          note: "Invalid URL format",
+          input: payload.value,
+          inst,
+          continue: !def.abort
+        });
+        return;
+      }
+      if (url === URL_UNPARSEABLE) {
+        payload.issues.push({
+          code: "invalid_format",
+          format: "url",
+          input: payload.value,
+          inst,
+          continue: !def.abort
+        });
+        return;
+      }
+      if (url === true) {
+        payload.value = stripTabAndNewline(trimmed);
+        return;
+      }
+      if (def.hostname && !urlHostnameOk(url, def.hostname)) {
+        payload.issues.push({
+          code: "invalid_format",
+          format: "url",
+          note: "Invalid hostname",
+          pattern: def.hostname.source,
+          input: payload.value,
+          inst,
+          continue: !def.abort
+        });
+      }
+      if (def.protocol && !urlProtocolOk(url, def.protocol)) {
+        payload.issues.push({
+          code: "invalid_format",
+          format: "url",
+          note: "Invalid protocol",
+          pattern: def.protocol.source,
+          input: payload.value,
+          inst,
+          continue: !def.abort
+        });
+      }
+      payload.value = def.normalize ? url.href : stripTabAndNewline(trimmed);
+      return;
+    } catch (_) {
+      payload.issues.push({
+        code: "invalid_format",
+        format: "url",
+        input: payload.value,
+        inst,
+        continue: !def.abort
+      });
+    }
+  };
+});
+var $ZodEmoji = /* @__PURE__ */ $constructor("$ZodEmoji", (inst, def) => {
+  def.pattern ?? (def.pattern = emoji());
+  $ZodStringFormat.init(inst, def);
+});
+var $ZodNanoID = /* @__PURE__ */ $constructor("$ZodNanoID", (inst, def) => {
+  if (def.length !== undefined && (!Number.isInteger(def.length) || def.length < 1))
+    throw new Error(`Invalid nanoid length: ${def.length}`);
+  def.pattern ?? (def.pattern = def.length === undefined ? nanoid : nanoidOfLength(def.length));
+  $ZodStringFormat.init(inst, def);
+});
+var $ZodCUID = /* @__PURE__ */ $constructor("$ZodCUID", (inst, def) => {
+  def.pattern ?? (def.pattern = cuid);
+  $ZodStringFormat.init(inst, def);
+});
+var $ZodCUID2 = /* @__PURE__ */ $constructor("$ZodCUID2", (inst, def) => {
+  def.pattern ?? (def.pattern = cuid2);
+  $ZodStringFormat.init(inst, def);
+});
+var $ZodULID = /* @__PURE__ */ $constructor("$ZodULID", (inst, def) => {
+  def.pattern ?? (def.pattern = ulid);
+  $ZodStringFormat.init(inst, def);
+});
+var $ZodXID = /* @__PURE__ */ $constructor("$ZodXID", (inst, def) => {
+  def.pattern ?? (def.pattern = xid);
+  $ZodStringFormat.init(inst, def);
+});
+var $ZodKSUID = /* @__PURE__ */ $constructor("$ZodKSUID", (inst, def) => {
+  def.pattern ?? (def.pattern = ksuid);
+  $ZodStringFormat.init(inst, def);
+});
+var $ZodISODateTime = /* @__PURE__ */ $constructor("$ZodISODateTime", (inst, def) => {
+  def.pattern ?? (def.pattern = datetime(def));
+  $ZodStringFormat.init(inst, def);
+});
+var $ZodISODate = /* @__PURE__ */ $constructor("$ZodISODate", (inst, def) => {
+  def.pattern ?? (def.pattern = date);
+  $ZodStringFormat.init(inst, def);
+});
+var $ZodISOTime = /* @__PURE__ */ $constructor("$ZodISOTime", (inst, def) => {
+  def.pattern ?? (def.pattern = time(def));
+  $ZodStringFormat.init(inst, def);
+});
+var $ZodISODuration = /* @__PURE__ */ $constructor("$ZodISODuration", (inst, def) => {
+  def.pattern ?? (def.pattern = duration);
+  $ZodStringFormat.init(inst, def);
+});
+var $ZodIPv4 = /* @__PURE__ */ $constructor("$ZodIPv4", (inst, def) => {
+  def.pattern ?? (def.pattern = ipv4);
+  $ZodStringFormat.init(inst, def);
+});
+var ipv6Alphabet = /^[0-9a-fA-F:.]+$/;
+function isValidIPv6(value) {
+  if (!ipv6Alphabet.test(value))
+    return false;
+  return canParseURL(`http://[${value}]`);
+}
+var $ZodIPv6 = /* @__PURE__ */ $constructor("$ZodIPv6", (inst, def) => {
+  def.pattern ?? (def.pattern = ipv6);
+  $ZodStringFormat.init(inst, def);
+  inst._zod.check = (payload) => {
+    if (!isValidIPv6(payload.value)) {
+      payload.issues.push({
+        code: "invalid_format",
+        format: "ipv6",
+        input: payload.value,
+        inst,
+        continue: !def.abort
+      });
+    }
+  };
+});
+var $ZodCIDRv4 = /* @__PURE__ */ $constructor("$ZodCIDRv4", (inst, def) => {
+  def.pattern ?? (def.pattern = cidrv4);
+  $ZodStringFormat.init(inst, def);
+});
+function isValidCIDRv6(value) {
+  const parts = value.split("/");
+  if (parts.length !== 2)
+    return false;
+  const [address, prefix] = parts;
+  if (!prefix)
+    return false;
+  const prefixNum = Number(prefix);
+  if (`${prefixNum}` !== prefix)
+    return false;
+  if (prefixNum < 0 || prefixNum > 128)
+    return false;
+  return isValidIPv6(address);
+}
+var $ZodCIDRv6 = /* @__PURE__ */ $constructor("$ZodCIDRv6", (inst, def) => {
+  def.pattern ?? (def.pattern = cidrv6);
+  $ZodStringFormat.init(inst, def);
+  inst._zod.check = (payload) => {
+    if (!isValidCIDRv6(payload.value)) {
+      payload.issues.push({
+        code: "invalid_format",
+        format: "cidrv6",
+        input: payload.value,
+        inst,
+        continue: !def.abort
+      });
+    }
+  };
+});
+function isValidBase64(data) {
+  if (data === "")
+    return true;
+  if (/\s/.test(data))
+    return false;
+  if (data.length % 4 !== 0)
+    return false;
+  try {
+    atob(data);
+    return true;
+  } catch {
+    return false;
+  }
+}
 var base64Charset = /^[0-9a-zA-Z+/]*={0,2}$/;
+var $ZodBase64 = /* @__PURE__ */ $constructor("$ZodBase64", (inst, def) => {
+  def.pattern ?? (def.pattern = base64Charset);
+  $ZodStringFormat.init(inst, def);
+  inst._zod.check = (payload) => {
+    if (isValidBase64(payload.value))
+      return;
+    payload.issues.push({
+      code: "invalid_format",
+      format: "base64",
+      input: payload.value,
+      inst,
+      continue: !def.abort
+    });
+  };
+});
 var base64urlCharset = /^[A-Za-z0-9_-]*$/;
+function isValidBase64URL(data) {
+  if (!base64urlCharset.test(data))
+    return false;
+  const base64 = data.replace(/[-_]/g, (c) => c === "-" ? "+" : "/");
+  const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+  return isValidBase64(padded);
+}
+var $ZodBase64URL = /* @__PURE__ */ $constructor("$ZodBase64URL", (inst, def) => {
+  def.pattern ?? (def.pattern = base64urlCharset);
+  $ZodStringFormat.init(inst, def);
+  inst._zod.check = (payload) => {
+    if (isValidBase64URL(payload.value))
+      return;
+    payload.issues.push({
+      code: "invalid_format",
+      format: "base64url",
+      input: payload.value,
+      inst,
+      continue: !def.abort
+    });
+  };
+});
+var $ZodE164 = /* @__PURE__ */ $constructor("$ZodE164", (inst, def) => {
+  def.pattern ?? (def.pattern = e164);
+  $ZodStringFormat.init(inst, def);
+});
+function isValidJWT(token, algorithm = null) {
+  try {
+    const tokensParts = token.split(".");
+    if (tokensParts.length !== 3)
+      return false;
+    const [header] = tokensParts;
+    if (!header)
+      return false;
+    const parsedHeader = JSON.parse(atob(header));
+    if ("typ" in parsedHeader && parsedHeader?.typ !== "JWT")
+      return false;
+    if (!parsedHeader.alg)
+      return false;
+    if (algorithm && (!("alg" in parsedHeader) || parsedHeader.alg !== algorithm))
+      return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+var $ZodJWT = /* @__PURE__ */ $constructor("$ZodJWT", (inst, def) => {
+  $ZodStringFormat.init(inst, def);
+  inst._zod.check = (payload) => {
+    if (isValidJWT(payload.value, def.alg))
+      return;
+    payload.issues.push({
+      code: "invalid_format",
+      format: "jwt",
+      input: payload.value,
+      inst,
+      continue: !def.abort
+    });
+  };
+});
 var $ZodNumber = /* @__PURE__ */ $constructor("$ZodNumber", (inst, def) => {
   $ZodType.init(inst, def);
   inst._zod.pattern = number;
@@ -2037,6 +2547,246 @@ function snapshotChecks(def) {
     def.checks = [...def.checks];
   return def;
 }
+function _string(Class, params) {
+  return new Class(snapshotChecks({ type: "string", ...normalizeParams(params) }));
+}
+function _email(Class, params) {
+  return new Class({
+    type: "string",
+    format: "email",
+    check: "string_format",
+    abort: false,
+    ...normalizeParams(params)
+  });
+}
+function _guid(Class, params) {
+  return new Class({
+    type: "string",
+    format: "guid",
+    check: "string_format",
+    abort: false,
+    ...normalizeParams(params)
+  });
+}
+function _uuid(Class, params) {
+  return new Class({
+    type: "string",
+    format: "uuid",
+    check: "string_format",
+    abort: false,
+    ...normalizeParams(params)
+  });
+}
+function _uuidv4(Class, params) {
+  return new Class({
+    type: "string",
+    format: "uuid",
+    check: "string_format",
+    abort: false,
+    version: "v4",
+    ...normalizeParams(params)
+  });
+}
+function _uuidv6(Class, params) {
+  return new Class({
+    type: "string",
+    format: "uuid",
+    check: "string_format",
+    abort: false,
+    version: "v6",
+    ...normalizeParams(params)
+  });
+}
+function _uuidv7(Class, params) {
+  return new Class({
+    type: "string",
+    format: "uuid",
+    check: "string_format",
+    abort: false,
+    version: "v7",
+    ...normalizeParams(params)
+  });
+}
+function _url(Class, params) {
+  return new Class({
+    type: "string",
+    format: "url",
+    check: "string_format",
+    abort: false,
+    ...normalizeParams(params)
+  });
+}
+function _emoji2(Class, params) {
+  return new Class({
+    type: "string",
+    format: "emoji",
+    check: "string_format",
+    abort: false,
+    ...normalizeParams(params)
+  });
+}
+function _nanoid(Class, params) {
+  return new Class({
+    type: "string",
+    format: "nanoid",
+    check: "string_format",
+    abort: false,
+    ...normalizeParams(params)
+  });
+}
+function _cuid(Class, params) {
+  return new Class({
+    type: "string",
+    format: "cuid",
+    check: "string_format",
+    abort: false,
+    ...normalizeParams(params)
+  });
+}
+function _cuid2(Class, params) {
+  return new Class({
+    type: "string",
+    format: "cuid2",
+    check: "string_format",
+    abort: false,
+    ...normalizeParams(params)
+  });
+}
+function _ulid(Class, params) {
+  return new Class({
+    type: "string",
+    format: "ulid",
+    check: "string_format",
+    abort: false,
+    ...normalizeParams(params)
+  });
+}
+function _xid(Class, params) {
+  return new Class({
+    type: "string",
+    format: "xid",
+    check: "string_format",
+    abort: false,
+    ...normalizeParams(params)
+  });
+}
+function _ksuid(Class, params) {
+  return new Class({
+    type: "string",
+    format: "ksuid",
+    check: "string_format",
+    abort: false,
+    ...normalizeParams(params)
+  });
+}
+function _ipv4(Class, params) {
+  return new Class({
+    type: "string",
+    format: "ipv4",
+    check: "string_format",
+    abort: false,
+    ...normalizeParams(params)
+  });
+}
+function _ipv6(Class, params) {
+  return new Class({
+    type: "string",
+    format: "ipv6",
+    check: "string_format",
+    abort: false,
+    ...normalizeParams(params)
+  });
+}
+function _cidrv4(Class, params) {
+  return new Class({
+    type: "string",
+    format: "cidrv4",
+    check: "string_format",
+    abort: false,
+    ...normalizeParams(params)
+  });
+}
+function _cidrv6(Class, params) {
+  return new Class({
+    type: "string",
+    format: "cidrv6",
+    check: "string_format",
+    abort: false,
+    ...normalizeParams(params)
+  });
+}
+function _base64(Class, params) {
+  return new Class({
+    type: "string",
+    format: "base64",
+    check: "string_format",
+    abort: false,
+    ...normalizeParams(params)
+  });
+}
+function _base64url(Class, params) {
+  return new Class({
+    type: "string",
+    format: "base64url",
+    check: "string_format",
+    abort: false,
+    ...normalizeParams(params)
+  });
+}
+function _e164(Class, params) {
+  return new Class({
+    type: "string",
+    format: "e164",
+    check: "string_format",
+    abort: false,
+    ...normalizeParams(params)
+  });
+}
+function _jwt(Class, params) {
+  return new Class({
+    type: "string",
+    format: "jwt",
+    check: "string_format",
+    abort: false,
+    ...normalizeParams(params)
+  });
+}
+function _isoDateTime(Class, params) {
+  return new Class({
+    type: "string",
+    format: "datetime",
+    check: "string_format",
+    offset: false,
+    local: false,
+    precision: null,
+    ...normalizeParams(params)
+  });
+}
+function _isoDate(Class, params) {
+  return new Class({
+    type: "string",
+    format: "date",
+    check: "string_format",
+    ...normalizeParams(params)
+  });
+}
+function _isoTime(Class, params) {
+  return new Class({
+    type: "string",
+    format: "time",
+    check: "string_format",
+    precision: null,
+    ...normalizeParams(params)
+  });
+}
+function _isoDuration(Class, params) {
+  return new Class({
+    type: "string",
+    format: "duration",
+    check: "string_format",
+    ...normalizeParams(params)
+  });
+}
 function _number(Class, params) {
   return new Class(snapshotChecks({ type: "number", checks: [], ...normalizeParams(params) }));
 }
@@ -2110,11 +2860,72 @@ function _length(length, params) {
     length
   });
 }
+function _regex(pattern, params) {
+  return new $ZodCheckRegex({
+    check: "string_format",
+    format: "regex",
+    ...normalizeParams(params),
+    pattern
+  });
+}
+function _lowercase(params) {
+  return new $ZodCheckLowerCase({
+    check: "string_format",
+    format: "lowercase",
+    ...normalizeParams(params)
+  });
+}
+function _uppercase(params) {
+  return new $ZodCheckUpperCase({
+    check: "string_format",
+    format: "uppercase",
+    ...normalizeParams(params)
+  });
+}
+function _includes(includes, params) {
+  return new $ZodCheckIncludes({
+    check: "string_format",
+    format: "includes",
+    ...normalizeParams(params),
+    includes
+  });
+}
+function _startsWith(prefix, params) {
+  return new $ZodCheckStartsWith({
+    check: "string_format",
+    format: "starts_with",
+    ...normalizeParams(params),
+    prefix
+  });
+}
+function _endsWith(suffix, params) {
+  return new $ZodCheckEndsWith({
+    check: "string_format",
+    format: "ends_with",
+    ...normalizeParams(params),
+    suffix
+  });
+}
 function _overwrite(tx) {
   return new $ZodCheckOverwrite({
     check: "overwrite",
     tx
   });
+}
+function _normalize(form) {
+  return _overwrite((input) => input.normalize(form));
+}
+function _trim() {
+  return _overwrite((input) => input.trim());
+}
+function _toLowerCase() {
+  return _overwrite((input) => input.toLowerCase());
+}
+function _toUpperCase() {
+  return _overwrite((input) => input.toUpperCase());
+}
+function _slugify() {
+  return _overwrite((input) => slugify(input));
 }
 function _array(Class, element, params) {
   return new Class({
@@ -2773,10 +3584,50 @@ function aggregateChecks(schema) {
     addPattern(agg, pattern);
   return agg;
 }
+var formatMap = {
+  guid: "uuid",
+  url: "uri",
+  datetime: "date-time",
+  json_string: "json-string",
+  regex: ""
+};
 var exactPatterns = new Map([
   [base64Charset, base64],
   [base64urlCharset, base64url]
 ]);
+var exactPattern = (p) => exactPatterns.get(p) ?? p;
+var stringProcessor = (schema, ctx, _json, _params) => {
+  const json = _json;
+  json.type = "string";
+  const { minimum, maximum, format, patterns, contentEncoding, laxFormat } = aggregateChecks(schema);
+  if (typeof minimum === "number")
+    json.minLength = minimum;
+  if (typeof maximum === "number")
+    json.maxLength = maximum;
+  if (format) {
+    json.format = formatMap[format] ?? format;
+    if (json.format === "")
+      delete json.format;
+    if (format === "time" || laxFormat) {
+      delete json.format;
+    }
+  }
+  if (contentEncoding)
+    json.contentEncoding = contentEncoding;
+  if (patterns && patterns.size > 0) {
+    const patternList = [...patterns].map(exactPattern);
+    if (patternList.length === 1)
+      json.pattern = patternList[0].source;
+    else if (patternList.length > 1) {
+      json.allOf = [
+        ...patternList.map((regex) => ({
+          ...ctx.target === "draft-07" || ctx.target === "draft-04" || ctx.target === "openapi-3.0" ? { type: "string" } : {},
+          pattern: regex.source
+        }))
+      ];
+    }
+  }
+};
 var numberProcessor = (schema, ctx, _json, params) => {
   const json = _json;
   const { minimum, maximum, multipleOf, exclusiveMaximum, exclusiveMinimum, isInt } = aggregateChecks(schema);
@@ -3208,6 +4059,243 @@ var ZodType = /* @__PURE__ */ $constructor("ZodType", (inst, def) => {
   get _def() {
     return this._zod.def;
   }
+});
+var _ZodString = /* @__PURE__ */ $constructor("_ZodString", (inst, def) => {
+  $ZodString.init(inst, def);
+  ZodType.init(inst, def);
+  inst._zod.processJSONSchema = (ctx, json, params) => stringProcessor(inst, ctx, json, params);
+}, /* @__PURE__ */ derived({
+  format: (inst) => aggregateChecks(inst).format ?? null,
+  minLength: (inst) => aggregateChecks(inst).minimum ?? null,
+  maxLength: (inst) => aggregateChecks(inst).maximum ?? null
+}, {
+  regex(...args) {
+    return this.check(_regex(...args));
+  },
+  includes(...args) {
+    return this.check(_includes(...args));
+  },
+  startsWith(...args) {
+    return this.check(_startsWith(...args));
+  },
+  endsWith(...args) {
+    return this.check(_endsWith(...args));
+  },
+  min(...args) {
+    return this.check(_minLength(...args));
+  },
+  max(...args) {
+    return this.check(_maxLength(...args));
+  },
+  length(...args) {
+    return this.check(_length(...args));
+  },
+  nonempty(...args) {
+    return this.check(_minLength(1, ...args));
+  },
+  lowercase(params) {
+    return this.check(_lowercase(params));
+  },
+  uppercase(params) {
+    return this.check(_uppercase(params));
+  },
+  trim() {
+    return this.check(_trim());
+  },
+  normalize(...args) {
+    return this.check(_normalize(...args));
+  },
+  toLowerCase() {
+    return this.check(_toLowerCase());
+  },
+  toUpperCase() {
+    return this.check(_toUpperCase());
+  },
+  slugify() {
+    return this.check(_slugify());
+  }
+}));
+var ZodString = /* @__PURE__ */ $constructor("ZodString", (inst, def) => {
+  $ZodString.init(inst, def);
+  _ZodString.init(inst, def);
+}, {
+  email(params) {
+    return this.check(_email(ZodEmail, params));
+  },
+  url(params) {
+    return this.check(_url(ZodURL, params));
+  },
+  jwt(params) {
+    return this.check(_jwt(ZodJWT, params));
+  },
+  emoji(params) {
+    return this.check(_emoji2(ZodEmoji, params));
+  },
+  guid(params) {
+    return this.check(_guid(ZodGUID, params));
+  },
+  uuid(params) {
+    return this.check(_uuid(ZodUUID, params));
+  },
+  uuidv4(params) {
+    return this.check(_uuidv4(ZodUUID, params));
+  },
+  uuidv6(params) {
+    return this.check(_uuidv6(ZodUUID, params));
+  },
+  uuidv7(params) {
+    return this.check(_uuidv7(ZodUUID, params));
+  },
+  nanoid(params) {
+    return this.check(_nanoid(ZodNanoID, params));
+  },
+  cuid(params) {
+    return this.check(_cuid(ZodCUID, params));
+  },
+  cuid2(params) {
+    return this.check(_cuid2(ZodCUID2, params));
+  },
+  ulid(params) {
+    return this.check(_ulid(ZodULID, params));
+  },
+  base64(params) {
+    return this.check(_base64(ZodBase64, params));
+  },
+  base64url(params) {
+    return this.check(_base64url(ZodBase64URL, params));
+  },
+  xid(params) {
+    return this.check(_xid(ZodXID, params));
+  },
+  ksuid(params) {
+    return this.check(_ksuid(ZodKSUID, params));
+  },
+  ipv4(params) {
+    return this.check(_ipv4(ZodIPv4, params));
+  },
+  ipv6(params) {
+    return this.check(_ipv6(ZodIPv6, params));
+  },
+  cidrv4(params) {
+    return this.check(_cidrv4(ZodCIDRv4, params));
+  },
+  cidrv6(params) {
+    return this.check(_cidrv6(ZodCIDRv6, params));
+  },
+  e164(params) {
+    return this.check(_e164(ZodE164, params));
+  },
+  datetime(params) {
+    return this.check(_isoDateTime(ZodISODateTime, params));
+  },
+  date(params) {
+    return this.check(_isoDate(ZodISODate, params));
+  },
+  time(params) {
+    return this.check(_isoTime(ZodISOTime, params));
+  },
+  duration(params) {
+    return this.check(_isoDuration(ZodISODuration, params));
+  }
+});
+function string2(params) {
+  return _string(ZodString, params);
+}
+var ZodStringFormat = /* @__PURE__ */ $constructor("ZodStringFormat", (inst, def) => {
+  $ZodStringFormat.init(inst, def);
+  _ZodString.init(inst, def);
+});
+var ZodISODateTime = /* @__PURE__ */ $constructor("ZodISODateTime", (inst, def) => {
+  $ZodISODateTime.init(inst, def);
+  ZodStringFormat.init(inst, def);
+});
+var ZodISODate = /* @__PURE__ */ $constructor("ZodISODate", (inst, def) => {
+  $ZodISODate.init(inst, def);
+  ZodStringFormat.init(inst, def);
+});
+var ZodISOTime = /* @__PURE__ */ $constructor("ZodISOTime", (inst, def) => {
+  $ZodISOTime.init(inst, def);
+  ZodStringFormat.init(inst, def);
+});
+var ZodISODuration = /* @__PURE__ */ $constructor("ZodISODuration", (inst, def) => {
+  $ZodISODuration.init(inst, def);
+  ZodStringFormat.init(inst, def);
+});
+var ZodEmail = /* @__PURE__ */ $constructor("ZodEmail", (inst, def) => {
+  $ZodEmail.init(inst, def);
+  ZodStringFormat.init(inst, def);
+});
+var ZodGUID = /* @__PURE__ */ $constructor("ZodGUID", (inst, def) => {
+  $ZodGUID.init(inst, def);
+  ZodStringFormat.init(inst, def);
+});
+var ZodUUID = /* @__PURE__ */ $constructor("ZodUUID", (inst, def) => {
+  $ZodUUID.init(inst, def);
+  ZodStringFormat.init(inst, def);
+});
+var ZodURL = /* @__PURE__ */ $constructor("ZodURL", (inst, def) => {
+  $ZodURL.init(inst, def);
+  ZodStringFormat.init(inst, def);
+});
+var ZodEmoji = /* @__PURE__ */ $constructor("ZodEmoji", (inst, def) => {
+  $ZodEmoji.init(inst, def);
+  ZodStringFormat.init(inst, def);
+});
+var ZodNanoID = /* @__PURE__ */ $constructor("ZodNanoID", (inst, def) => {
+  $ZodNanoID.init(inst, def);
+  ZodStringFormat.init(inst, def);
+});
+var ZodCUID = /* @__PURE__ */ $constructor("ZodCUID", (inst, def) => {
+  $ZodCUID.init(inst, def);
+  ZodStringFormat.init(inst, def);
+});
+var ZodCUID2 = /* @__PURE__ */ $constructor("ZodCUID2", (inst, def) => {
+  $ZodCUID2.init(inst, def);
+  ZodStringFormat.init(inst, def);
+});
+var ZodULID = /* @__PURE__ */ $constructor("ZodULID", (inst, def) => {
+  $ZodULID.init(inst, def);
+  ZodStringFormat.init(inst, def);
+});
+var ZodXID = /* @__PURE__ */ $constructor("ZodXID", (inst, def) => {
+  $ZodXID.init(inst, def);
+  ZodStringFormat.init(inst, def);
+});
+var ZodKSUID = /* @__PURE__ */ $constructor("ZodKSUID", (inst, def) => {
+  $ZodKSUID.init(inst, def);
+  ZodStringFormat.init(inst, def);
+});
+var ZodIPv4 = /* @__PURE__ */ $constructor("ZodIPv4", (inst, def) => {
+  $ZodIPv4.init(inst, def);
+  ZodStringFormat.init(inst, def);
+});
+var ZodIPv6 = /* @__PURE__ */ $constructor("ZodIPv6", (inst, def) => {
+  $ZodIPv6.init(inst, def);
+  ZodStringFormat.init(inst, def);
+});
+var ZodCIDRv4 = /* @__PURE__ */ $constructor("ZodCIDRv4", (inst, def) => {
+  $ZodCIDRv4.init(inst, def);
+  ZodStringFormat.init(inst, def);
+});
+var ZodCIDRv6 = /* @__PURE__ */ $constructor("ZodCIDRv6", (inst, def) => {
+  $ZodCIDRv6.init(inst, def);
+  ZodStringFormat.init(inst, def);
+});
+var ZodBase64 = /* @__PURE__ */ $constructor("ZodBase64", (inst, def) => {
+  $ZodBase64.init(inst, def);
+  ZodStringFormat.init(inst, def);
+});
+var ZodBase64URL = /* @__PURE__ */ $constructor("ZodBase64URL", (inst, def) => {
+  $ZodBase64URL.init(inst, def);
+  ZodStringFormat.init(inst, def);
+});
+var ZodE164 = /* @__PURE__ */ $constructor("ZodE164", (inst, def) => {
+  $ZodE164.init(inst, def);
+  ZodStringFormat.init(inst, def);
+});
+var ZodJWT = /* @__PURE__ */ $constructor("ZodJWT", (inst, def) => {
+  $ZodJWT.init(inst, def);
+  ZodStringFormat.init(inst, def);
 });
 var ZodNumber = /* @__PURE__ */ $constructor("ZodNumber", (inst, def) => {
   $ZodNumber.init(inst, def);
@@ -3654,8 +4742,9 @@ function recordSession(ledger, info, event = {}) {
   const prior = ledger.sessions[info.id] || { parentID: null, startAt: null, metadata: {} };
   const timestamp = Number.isFinite(info.time?.updated) ? info.time.updated : Number.isFinite(info.time?.created) ? info.time.created : event.receivedAt ?? Date.now();
   const fields = {};
-  if (Object.hasOwn(info, "parentID"))
-    fields.parentID = info.parentID;
+  const metadataVerified = event.metadataVerified === true;
+  if (metadataVerified)
+    fields.parentID = Object.hasOwn(info, "parentID") ? info.parentID : null;
   if (Number.isFinite(info.time?.created))
     fields.startAt = info.time.created;
   for (const field of ["projectID", "directory"])
@@ -3671,6 +4760,8 @@ function recordSession(ledger, info, event = {}) {
       updatedAt: Number.isFinite(info.time?.updated) ? info.time.updated : null,
       revision: Number.isFinite(info.revision) ? info.revision : null,
       versionKind: Number.isFinite(info.time?.updated) ? "updated" : Number.isFinite(info.revision) ? "revision" : null,
+      metadataVerified,
+      projectKey: event.projectKey || info.projectID || null,
       writerID: event.writerID || "local",
       writerSeq: event.writerSeq || 0,
       eventID: event.eventID || randomUUID()
@@ -3683,6 +4774,11 @@ function recordSession(ledger, info, event = {}) {
       ledger.sessions[info.id][field] = selected.fields[field];
   }
   ledger.sessions[info.id].candidates = candidates;
+  const selected = winner(candidates);
+  ledger.sessions[info.id].metadataVerified = selected.metadataVerified === true;
+  ledger.sessions[info.id].projectKey = selected.projectKey || null;
+  if (fields.directory)
+    ledger.sessions[info.id].directory = fields.directory;
 }
 function tombstoneSession(ledger, id, event = {}) {
   if (typeof id !== "string" || !id)
@@ -3730,7 +4826,16 @@ function normalizeLedger(input) {
       if (selected)
         resolved[field] = selected.fields[field];
     }
-    ledger.sessions[id] = { parentID: null, startAt: null, metadata: {}, ...resolved, candidates: unique.sort(receiptOrder) };
+    const selected = winner(unique);
+    ledger.sessions[id] = {
+      parentID: null,
+      startAt: null,
+      metadata: {},
+      ...resolved,
+      metadataVerified: selected.metadataVerified === true,
+      projectKey: selected.projectKey || null,
+      candidates: unique.sort(receiptOrder)
+    };
   }
   ledger.approvals = [...input.approvals || []];
   ledger.configs = [...input.configs || []];
@@ -3774,7 +4879,16 @@ function mergeLedger(...sources) {
       if (selected)
         resolved[field] = selected.fields[field];
     }
-    ledger.sessions[id] = { parentID: null, startAt: null, metadata: {}, ...resolved, candidates: candidates.sort(receiptOrder) };
+    const selected = winner(candidates);
+    ledger.sessions[id] = {
+      parentID: null,
+      startAt: null,
+      metadata: {},
+      ...resolved,
+      metadataVerified: selected.metadataVerified === true,
+      projectKey: selected.projectKey || null,
+      candidates: candidates.sort(receiptOrder)
+    };
   }
   ledger.approvals = [...approvals.values()].sort((a, b) => String(a.id).localeCompare(String(b.id)));
   ledger.configs = [...configs.values()].sort((a, b) => a.eventID.localeCompare(b.eventID));
@@ -3866,17 +4980,34 @@ function descendants(ledger, root) {
   return result;
 }
 function canonicalRoot(ledger, id) {
-  const value = normalizeLedger(ledger), seen = new Set;
-  let current = id;
-  while (value.sessions[current]?.parentID) {
-    if (seen.has(current))
-      return { id: current, complete: false };
-    seen.add(current);
-    current = value.sessions[current].parentID;
-  }
-  return { id: current, complete: !seen.has(current) };
+  return canonicalAncestry(ledger, id);
 }
-function effectiveBudgetLimits(config, { agent, sessionID, rootID, approvals = [] }) {
+function canonicalAncestry(ledger, id, expectedProjectKey) {
+  const value = normalizeLedger(ledger), seen = new Set;
+  let current = id, depth = 0, project = null;
+  while (true) {
+    if (seen.has(current))
+      return { id: current, complete: false, reason: "cycle", depth, isRoot: false };
+    seen.add(current);
+    const session = value.sessions[current];
+    if (!session || session.metadataVerified !== true)
+      return { id: current, complete: false, reason: "unverified-session", depth, isRoot: false };
+    if (typeof session.projectKey !== "string" || !session.projectKey)
+      return { id: current, complete: false, reason: "missing-project-identity", depth, isRoot: false };
+    project ||= session.projectKey;
+    if (session.projectKey !== project || expectedProjectKey && session.projectKey !== expectedProjectKey && session.directory !== expectedProjectKey)
+      return { id: current, complete: false, reason: "project-mismatch", depth, isRoot: false };
+    if (!Object.hasOwn(session, "parentID"))
+      return { id: current, complete: false, reason: "missing-parent-metadata", depth, isRoot: false };
+    if (session.parentID == null)
+      return { id: current, complete: true, reason: null, depth, isRoot: depth === 0, projectKey: project };
+    if (typeof session.parentID !== "string" || !session.parentID)
+      return { id: current, complete: false, reason: "invalid-parent-metadata", depth, isRoot: false };
+    current = session.parentID;
+    depth++;
+  }
+}
+function effectiveBudgetLimits(config, { agent, sessionID, rootID, approvals = [], ancestry = { complete: false, reason: "unverified-session" } }) {
   const matches = (pattern) => agent == null ? pattern === "*" : globMatch(pattern, agent);
   const resolve = (fallback, perAgent) => {
     for (const [pattern, value] of perAgent || [])
@@ -3887,9 +5018,13 @@ function effectiveBudgetLimits(config, { agent, sessionID, rootID, approvals = [
   const applies = !(config.exclude || []).some(matches) && (!(config.agents || []).length || (config.agents || []).some(matches));
   const extra = (scope, id, key) => approvals.filter((item) => item.scope === scope && item.sessionID === id).flatMap((item) => item.dimensions || []).reduce((sum, dimension) => sum + (dimension[key] || 0), 0);
   const usd = config.usdEnabled === false || !applies ? null : resolve(config.sessionLimit, config.limits);
-  const tokens = !applies || !Number.isFinite(config.tokenLimit) ? null : config.tokenLimit;
+  const tokens = !applies || !Number.isSafeInteger(config.tokenLimit) ? null : config.tokenLimit;
   const sessionExtensionUsd = extra("session", sessionID, "usd"), sessionExtensionTokens = extra("session", sessionID, "tokens");
   const runExtensionUsd = extra("run", rootID, "usd"), runExtensionTokens = extra("run", rootID, "tokens");
+  const subagentBaseLimit = ancestry.complete && !ancestry.isRoot && Number.isSafeInteger(config.subagentTokenLimit) && config.subagentTokenLimit > 0 ? config.subagentTokenLimit : null;
+  const tokenBases = [tokens, subagentBaseLimit].filter((limit) => limit != null);
+  const sessionExtensionActive = tokens != null || subagentBaseLimit != null ? sessionExtensionTokens : 0;
+  const effectiveSessionTokenLimit = tokenBases.length ? Math.min(...tokenBases) + sessionExtensionActive : null;
   return {
     applies,
     excluded: (config.exclude || []).some(matches),
@@ -3897,11 +5032,56 @@ function effectiveBudgetLimits(config, { agent, sessionID, rootID, approvals = [
     sessionExtensionTokens,
     runExtensionUsd,
     runExtensionTokens,
+    ancestryComplete: ancestry.complete,
+    ancestryReason: ancestry.reason || null,
+    subagentApplicable: ancestry.complete && !ancestry.isRoot,
+    subagentBaseLimit,
+    subagentEffectiveLimit: subagentBaseLimit == null ? null : subagentBaseLimit + sessionExtensionActive,
+    subagentCapAvailable: subagentBaseLimit != null,
+    activeTokenDimensions: { legacySession: tokens, subagent: subagentBaseLimit, effectiveSession: effectiveSessionTokenLimit },
+    legacyTokenLimit: tokens,
+    effectiveSessionTokenLimit,
     sessionUsdLimit: usd == null ? null : usd + sessionExtensionUsd,
-    sessionTokenLimit: tokens == null ? null : tokens + sessionExtensionTokens,
+    sessionTokenLimit: effectiveSessionTokenLimit,
     runUsdLimit: config.usdEnabled === false || !Number.isFinite(config.runLimit) ? null : config.runLimit + runExtensionUsd,
     runTokenLimit: !Number.isFinite(config.runTokenLimit) ? null : config.runTokenLimit + runExtensionTokens
   };
+}
+function formatSubagentCheckpoint({ id, title, totalTokens, input, output, reasoning, limit, approvalTokens }) {
+  const marker = `<!-- cost-guard-checkpoint:${id} -->`;
+  const safeTitle = typeof title === "string" ? ` (${title.replace(/[<>]/g, "").slice(0, 80)})` : "";
+  return `${marker}
+Subagent checkpoint: ${id}${safeTitle}; ${totalTokens}/${limit} lifetime tokens; input ${input} + output ${output} + reasoning ${reasoning} (cache excluded). Ask the user: (1) Evaluate stuck first: inspect available task results, prior errors, repeated failed checks, and evidence of no progress; state only supported findings and recommend Continue, Stop, or a distinct fresh attempt; (2) Continue only after approval, using cost_guard_extend({tokens:${approvalTokens}, sessionID:"${id}"}); or (3) Stop. Evaluation does not approve or unlock. Get final user approval before any extension or restart. A fresh attempt has a new session, not erased usage or bypassed run caps; token extension may leave USD/run blockers active.`;
+}
+function appendSubagentCheckpoints(existing = "", entries = [], { limit = 8, maxChars = 6000 } = {}) {
+  const original = typeof existing === "string" ? existing : "";
+  const overflowPattern = /\n?<!-- cost-guard-checkpoint-overflow:[^>]+ -->[^\n]*(?:\n|$)/g;
+  const source = original.replace(overflowPattern, "");
+  const markerPattern = /<!-- cost-guard-checkpoint:([^ >]+) -->/g;
+  const visible = new Set([...source.matchAll(markerPattern)].map((match) => match[1]));
+  if (original.match(/<!-- cost-guard-checkpoint-overflow:\d+:\d+:\d+ -->/))
+    return original;
+  const unique = [...new Map(entries.map((entry) => [entry.id, entry])).values()];
+  const unseen = unique.filter((entry) => !visible.has(entry.id));
+  const visibleSlots = Math.max(0, limit - visible.size);
+  const selected = [];
+  const render = () => selected.map(formatSubagentCheckpoint);
+  const summaryFor = () => {
+    const shown = visible.size + selected.length;
+    const omitted = unique.length - shown;
+    return omitted > 0 ? `<!-- cost-guard-checkpoint-overflow:${limit}:${unique.length}:${shown} --> Checkpoint notice bounded: showing ${shown} of ${unique.length} over-budget verified descendants; ${omitted} not shown.` : "";
+  };
+  for (const entry of unseen.slice(0, visibleSlots)) {
+    selected.push(entry);
+    const proposed = [...render(), summaryFor()].filter(Boolean).join(`
+`);
+    if (proposed.length > maxChars)
+      selected.pop();
+  }
+  const suffix = [...render(), summaryFor()].filter(Boolean).join(`
+`);
+  return suffix ? `${source}${source ? `
+` : ""}${suffix}` : source;
 }
 function globMatch(pattern, value) {
   if (typeof pattern !== "string" || typeof value !== "string")
@@ -4063,6 +5243,7 @@ function resolveLimit(cfg, agent) {
   }
   return cfg.limit;
 }
+var projectKeyForDirectory = (directory) => projectKey(directory);
 function fmtNum(n) {
   const v = Number(n) || 0;
   if (v >= 1e6)
@@ -4112,6 +5293,7 @@ function normalizeOptions(options = {}) {
     onBlock: options.onBlock === "ask" ? "ask" : "stop",
     notify: options.notify !== false,
     tokenLimit: Number.isSafeInteger(options.tokenLimit) && options.tokenLimit > 0 ? options.tokenLimit : null,
+    subagentTokenLimit: Number.isSafeInteger(options.subagentTokenLimit) && options.subagentTokenLimit > 0 ? options.subagentTokenLimit : null,
     runLimit: Number.isFinite(options.runLimit) && options.runLimit > 0 ? options.runLimit : null,
     runTokenLimit: Number.isSafeInteger(options.runTokenLimit) && options.runTokenLimit > 0 ? options.runTokenLimit : null,
     usdEnabled: options.usdEnabled !== false,
@@ -4126,11 +5308,17 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
   let storePromise = cfg.persist ? createStore({ directory: cfg.stateDirectory, filename: "cost-guard.json", projectDirectory }) : Promise.resolve(null);
   let writeQueue = Promise.resolve();
   let writerSeq = 0;
-  const ready = storePromise.then(async (store) => {
+  const transientTitles = new Map;
+  const metadataParents = new Map;
+  let projectKey = projectContext.projectKey || null;
+  const projectIdentity = projectKey ? Promise.resolve(projectKey) : projectKeyForDirectory(projectDirectory);
+  const ready = Promise.all([storePromise, projectIdentity]).then(async ([store, key]) => {
+    projectKey = key;
     if (store)
       ledger = await store.load();
   });
   let recoveredSessions = new Map;
+  const verifiedMetadataRequests = new Map;
   const enqueue = (mutation) => {
     writeQueue = writeQueue.then(async () => {
       await ready;
@@ -4153,6 +5341,63 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
       }
     });
     return writeQueue;
+  };
+  const verifySessionMetadata = async (sessionID) => {
+    if (verifiedMetadataRequests.has(sessionID))
+      return verifiedMetadataRequests.get(sessionID);
+    const pending = (async () => {
+      if (typeof client?.session?.get !== "function")
+        return false;
+      try {
+        const response = await client.session.get({ path: { id: sessionID } });
+        const info = response?.data;
+        if (!info || response.error || info.id !== sessionID || typeof info.directory !== "string" || await projectKeyForDirectory(info.directory) !== projectKey || typeof info.projectID !== "string")
+          return false;
+        if (typeof info.title === "string")
+          transientTitles.set(sessionID, info.title.slice(0, 512));
+        metadataParents.set(sessionID, Object.hasOwn(info, "parentID") ? info.parentID : null);
+        await enqueue((current, eventID) => recordSession(current, info, {
+          eventID,
+          writerID: projectContext.instanceID || `${process.pid}`,
+          metadataVerified: true,
+          projectKey
+        }));
+        return ledger.sessions[sessionID]?.metadataVerified === true && ledger.sessions[sessionID]?.projectKey === projectKey;
+      } catch {
+        return false;
+      }
+    })();
+    verifiedMetadataRequests.set(sessionID, pending);
+    const verified = await pending;
+    if (!verified)
+      verifiedMetadataRequests.delete(sessionID);
+    return verified;
+  };
+  const recoverAncestry = async (sessionID) => {
+    await ready;
+    const existing = canonicalRoot(ledger, sessionID, projectKey);
+    if (existing.complete)
+      return existing;
+    let current = sessionID;
+    const seen = new Set;
+    for (let depth = 0;depth < 128; depth++) {
+      if (seen.has(current))
+        return { id: current, complete: false, reason: "cycle", isRoot: false };
+      seen.add(current);
+      if (!await verifySessionMetadata(current))
+        return canonicalRoot(ledger, sessionID, projectKey);
+      await refresh();
+      const session = ledger.sessions[current];
+      const sdkParent = metadataParents.get(current);
+      if (!session || session.metadataVerified !== true || session.projectKey !== projectKey || sdkParent === undefined)
+        return canonicalRoot(ledger, sessionID, projectKey);
+      if (sdkParent == null)
+        return canonicalRoot(ledger, sessionID, projectKey);
+      if (typeof sdkParent !== "string" || !sdkParent)
+        return canonicalRoot(ledger, sessionID, projectKey);
+      current = sdkParent;
+    }
+    return { id: current, complete: false, reason: "depth-limit", isRoot: false };
   };
   const ensureRecovered = async (sessionID) => {
     if (recoveredSessions.has(sessionID))
@@ -4187,6 +5432,50 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
     });
     await writeQueue;
   };
+  const verifiedTaskEntries = async (callerSessionID) => {
+    await recoverAncestry(callerSessionID);
+    await refresh();
+    const caller = canonicalRoot(ledger, callerSessionID, projectKey);
+    if (!caller.complete || caller.isRoot !== true)
+      return [];
+    const candidates = descendants(ledger, callerSessionID).filter((id) => id !== callerSessionID);
+    const eligible = [];
+    for (const childID of candidates) {
+      const ancestry = canonicalRoot(ledger, childID, projectKey);
+      if (!ancestry.complete || ancestry.id !== callerSessionID)
+        continue;
+      const totals = aggregate(ledger, [childID]);
+      const child = ledger.sessions[childID];
+      const agent = [...Object.values(ledger.messages)].find((message) => message.sessionID === childID)?.mode || "unknown";
+      const effective = effectiveBudgetLimits({
+        subagentTokenLimit: cfg.subagentTokenLimit,
+        tokenLimit: cfg.tokenLimit,
+        agents: cfg.agents,
+        exclude: cfg.exclude,
+        usdEnabled: cfg.usdEnabled
+      }, {
+        agent,
+        sessionID: childID,
+        rootID: callerSessionID,
+        approvals: ledger.approvals,
+        ancestry
+      });
+      if (effective.subagentEffectiveLimit == null || totals.totalTokens < effective.subagentEffectiveLimit)
+        continue;
+      eligible.push({
+        id: childID,
+        title: transientTitles.get(childID),
+        totalTokens: totals.totalTokens,
+        input: totals.input,
+        output: totals.output,
+        reasoning: totals.reasoning,
+        limit: effective.subagentEffectiveLimit,
+        approvalTokens: effective.subagentBaseLimit
+      });
+    }
+    return eligible;
+  };
+  const verifiedTaskNotice = async (callerSessionID, limit = 8) => appendSubagentCheckpoints("", await verifiedTaskEntries(callerSessionID), { limit });
   let generation = 0;
   const budgetSnapshot = () => ({
     schema: "opencode-cost-guard-budget-v1",
@@ -4197,6 +5486,7 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
     agents: cfg.agents,
     exclude: cfg.exclude,
     tokenLimit: cfg.tokenLimit,
+    subagentTokenLimit: cfg.subagentTokenLimit,
     runLimit: cfg.runLimit,
     runTokenLimit: cfg.runTokenLimit,
     usdEnabled: cfg.usdEnabled
@@ -4295,24 +5585,28 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
   const overLimit = async (sessionID) => {
     const s = refreshSession(sessionID);
     const enforceSession = applies(s.agent);
+    const ancestry = canonicalRoot(ledger, sessionID, projectKey);
     const effective = effectiveBudgetLimits({
       sessionLimit: cfg.limit,
       limits: cfg.limits,
       agents: cfg.agents,
       exclude: cfg.exclude,
       tokenLimit: cfg.tokenLimit,
+      subagentTokenLimit: cfg.subagentTokenLimit,
       runLimit: cfg.runLimit,
       runTokenLimit: cfg.runTokenLimit,
       usdEnabled: cfg.usdEnabled
-    }, { agent: s.agent || "?", sessionID, rootID: canonicalRoot(ledger, sessionID).id, approvals: ledger.approvals });
+    }, { agent: s.agent || "?", sessionID, rootID: ancestry.id, approvals: ledger.approvals, ancestry });
     const limit = effective.sessionUsdLimit ?? resolveLimit(cfg, s.agent);
     s.limit = limit;
     const totals = sessionTotals(sessionID);
     s.cost = totals.cost ?? 0;
     s.tokens = { input: totals.input, output: totals.output, reasoning: totals.reasoning, cacheRead: totals.cacheRead, cacheWrite: totals.cacheWrite };
     const tokenLimit = effective.sessionTokenLimit;
-    const usageOver = enforceSession && (cfg.usdEnabled && effective.sessionUsdLimit != null && totals.cost >= effective.sessionUsdLimit || tokenLimit != null && totals.totalTokens >= tokenLimit);
-    const root = canonicalRoot(ledger, sessionID);
+    const legacyOver = enforceSession && (cfg.usdEnabled && effective.sessionUsdLimit != null && totals.cost >= effective.sessionUsdLimit || effective.legacyTokenLimit != null && totals.totalTokens >= effective.legacyTokenLimit + effective.sessionExtensionTokens);
+    const subagentOver = effective.subagentEffectiveLimit != null && totals.totalTokens >= effective.subagentEffectiveLimit;
+    const usageOver = legacyOver || subagentOver;
+    const root = ancestry;
     const run = aggregate(ledger, descendants(ledger, root.id));
     const runLimit = effective.runUsdLimit;
     const runTokenLimit = effective.runTokenLimit;
@@ -4321,7 +5615,7 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
       return true;
     if (s.blocked)
       s.blocked = false;
-    const threshold = cfg.usdEnabled && effective.sessionUsdLimit != null && totals.cost >= effective.sessionUsdLimit * cfg.warnRatio || tokenLimit != null && totals.totalTokens >= tokenLimit * cfg.warnRatio || runLimit != null && run.cost >= runLimit * cfg.warnRatio || runTokenLimit != null && run.totalTokens >= runTokenLimit * cfg.warnRatio;
+    const threshold = cfg.usdEnabled && effective.sessionUsdLimit != null && totals.cost >= effective.sessionUsdLimit * cfg.warnRatio || effective.sessionTokenLimit != null && totals.totalTokens >= effective.sessionTokenLimit * cfg.warnRatio || runLimit != null && run.cost >= runLimit * cfg.warnRatio || runTokenLimit != null && run.totalTokens >= runTokenLimit * cfg.warnRatio;
     if (!threshold && s.warned)
       s.warned = false;
     if (!s.warned && threshold) {
@@ -4330,10 +5624,21 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
     }
     return false;
   };
-  const extend = async (sessionID, usd, tokens, scope = "session") => {
+  const extend = async (callerSessionID, usd, tokens, scope = "session", targetSessionID = callerSessionID) => {
+    await recoverAncestry(callerSessionID);
+    if (targetSessionID !== callerSessionID)
+      await recoverAncestry(targetSessionID);
     await refresh();
-    const s = refreshSession(sessionID);
-    const root = scope === "run" ? canonicalRoot(ledger, sessionID).id : sessionID;
+    const callerAncestry = canonicalRoot(ledger, callerSessionID, projectKey);
+    const targetAncestry = canonicalRoot(ledger, targetSessionID, projectKey);
+    if (targetSessionID !== callerSessionID && (!callerAncestry.complete || callerAncestry.isRoot !== true || callerAncestry.id !== callerSessionID || !targetAncestry.complete || targetAncestry.id !== callerSessionID || targetAncestry.isRoot || !targetAncestry.projectKey || targetAncestry.projectKey !== callerAncestry.projectKey || targetAncestry.projectKey !== projectKey))
+      throw new Error("cost-guard: target session is not a verified descendant in the caller's project");
+    if (scope === "run" && !targetAncestry.complete)
+      throw new Error("cost-guard: run extension requires verified root ancestry");
+    if (targetSessionID !== callerSessionID && scope === "run")
+      throw new Error("cost-guard: cross-session run extensions are not allowed");
+    const s = refreshSession(targetSessionID);
+    const root = scope === "run" ? targetAncestry.id : targetSessionID;
     const dimensions = [];
     if (usd != null) {
       if (!cfg.usdEnabled || (scope === "run" ? cfg.runLimit == null : false))
@@ -4343,25 +5648,53 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
       dimensions.push({ usd });
     }
     if (tokens != null) {
-      if (!Number.isSafeInteger(tokens) || tokens <= 0 || (scope === "run" ? cfg.runTokenLimit == null : cfg.tokenLimit == null))
+      if (!Number.isSafeInteger(tokens) || tokens <= 0 || (scope === "run" ? cfg.runTokenLimit == null : cfg.tokenLimit == null && cfg.subagentTokenLimit == null))
         throw new Error(`cost-guard: ${scope} token budget is not active or extension is invalid`);
       dimensions.push({ tokens });
     }
     if (!dimensions.length) {
       if (scope === "run")
         throw new Error("cost-guard: specify a USD and/or token amount for a run extension");
-      if (!cfg.usdEnabled && cfg.tokenLimit != null)
-        dimensions.push({ tokens: cfg.tokenLimit });
-      else if (cfg.usdEnabled)
+      const effective = effectiveBudgetLimits({
+        tokenLimit: cfg.tokenLimit,
+        subagentTokenLimit: cfg.subagentTokenLimit,
+        agents: cfg.agents,
+        exclude: cfg.exclude,
+        usdEnabled: cfg.usdEnabled
+      }, {
+        agent: s.agent,
+        sessionID: targetSessionID,
+        rootID: targetAncestry.id,
+        approvals: ledger.approvals,
+        ancestry: targetAncestry
+      });
+      if (cfg.usdEnabled)
         dimensions.push({ usd: resolveLimit(cfg, s.agent) });
-      else
-        throw new Error("cost-guard: no active budget dimension to extend");
+      else {
+        const activeTokenBases = [effective.legacyTokenLimit, effective.subagentBaseLimit].filter((value) => value != null);
+        if (activeTokenBases.length)
+          dimensions.push({ tokens: Math.min(...activeTokenBases) });
+        else
+          throw new Error("cost-guard: no active budget dimension to extend");
+      }
     }
     const approval = { id: `${process.pid}:${Date.now()}:${Math.random()}`, scope, sessionID: root, dimensions, createdAt: Date.now() };
     await enqueue((current, eventID) => addApproval(current, { ...approval, id: eventID, eventID }));
     s.blocked = false;
     s.warned = false;
-    return scope === "run" ? root : resolveLimit(cfg, s.agent) + approved(sessionID, "session").usd;
+    return scope === "run" ? root : targetSessionID === callerSessionID ? resolveLimit(cfg, s.agent) + approved(targetSessionID, "session").usd : effectiveBudgetLimits({
+      tokenLimit: cfg.tokenLimit,
+      subagentTokenLimit: cfg.subagentTokenLimit,
+      agents: cfg.agents,
+      exclude: cfg.exclude,
+      usdEnabled: cfg.usdEnabled
+    }, {
+      agent: s.agent,
+      sessionID: targetSessionID,
+      rootID: root,
+      approvals: ledger.approvals,
+      ancestry: targetAncestry
+    }).effectiveSessionTokenLimit;
   };
   const isAskTool = (tool) => tool === "question" || String(tool).includes("cost_guard");
   const describe = (sessionID) => explainCost(get(sessionID));
@@ -4378,8 +5711,23 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
           await overLimit(info.sessionID);
         }
       } else if (event.type === "session.created" || event.type === "session.updated") {
+        const info = event.properties.info;
+        if (typeof info.title === "string")
+          transientTitles.set(info.id, info.title.slice(0, 512));
+        let verified = false;
+        try {
+          verified = typeof info.directory === "string" && await projectKeyForDirectory(info.directory) === projectKey;
+        } catch {
+          verified = false;
+        }
         await enqueue((current, eventID) => {
-          recordSession(current, event.properties.info, { eventID, writerID: projectContext.instanceID || `${process.pid}`, writerSeq: ++writerSeq });
+          recordSession(current, info, {
+            eventID,
+            writerID: projectContext.instanceID || `${process.pid}`,
+            writerSeq: ++writerSeq,
+            metadataVerified: verified,
+            projectKey: verified ? projectKey : null
+          });
         });
       } else if (event.type === "session.deleted") {
         await enqueue((current, eventID) => {
@@ -4412,8 +5760,22 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
       }
     },
     "tool.execute.before": async (input) => {
+      await recoverAncestry(input.sessionID);
       await refresh();
       const s = refreshSession(input.sessionID);
+      const ancestry = canonicalRoot(ledger, input.sessionID, projectKey);
+      const totals = sessionTotals(input.sessionID);
+      const effective = effectiveBudgetLimits({
+        sessionLimit: cfg.limit,
+        limits: cfg.limits,
+        agents: cfg.agents,
+        exclude: cfg.exclude,
+        tokenLimit: cfg.tokenLimit,
+        subagentTokenLimit: cfg.subagentTokenLimit,
+        runLimit: cfg.runLimit,
+        runTokenLimit: cfg.runTokenLimit,
+        usdEnabled: cfg.usdEnabled
+      }, { agent: s.agent || "?", sessionID: input.sessionID, rootID: ancestry.id, approvals: ledger.approvals, ancestry });
       const over = await overLimit(input.sessionID);
       if (!over || cfg.action !== "block")
         return;
@@ -4430,8 +5792,18 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
             why: explainCost(s)
           });
         }
-        throw new Error(`cost-guard: session usage exceeded an active budget` + `${s.agent ? ` (agent ${s.agent})` : ""}. Ask the user with the \`question\` tool whether to` + ` continue and how much extra USD or tokens to grant, then call \`cost_guard_extend\` and resume; otherwise stop.
-${explainCost(s)}`);
+        const title = transientTitles.get(input.sessionID)?.replace(/[\\r\\n<>]/g, " ").slice(0, 80);
+        const checkpoint = effective.subagentEffectiveLimit != null ? `${formatSubagentCheckpoint({
+          id: input.sessionID,
+          title,
+          totalTokens: totals.totalTokens,
+          input: totals.input,
+          output: totals.output,
+          reasoning: totals.reasoning,
+          limit: effective.subagentEffectiveLimit,
+          approvalTokens: effective.subagentBaseLimit
+        })} Parent root ${ancestry.id} is the authority for this decision. ` : "Ask the user whether to continue and how much extra USD or tokens to grant, then call cost_guard_extend and resume; otherwise stop. The existing question tool remains available when permitted. ";
+        throw new Error(`cost-guard: active budget exceeded. ${checkpoint}input ${totals.input} + output ${totals.output} + reasoning ${totals.reasoning} = ${totals.totalTokens} budget tokens (cache excluded). ${explainCost(s)}`);
       }
       if (!s.blocked) {
         s.blocked = true;
@@ -4446,12 +5818,47 @@ ${explainCost(s)}`);
       throw new Error(`cost-guard: session or run usage exceeded an active budget` + `${s.agent ? ` (agent ${s.agent})` : ""}. Raise the limit or switch to a cheaper model.
 ` + explainCost(s));
     },
+    "tool.execute.after": async ({ tool, sessionID }, output) => {
+      if (tool !== "task" || !output || typeof output !== "object")
+        return;
+      const entries = await verifiedTaskEntries(sessionID);
+      if (!entries.length)
+        return;
+      output.output = appendSubagentCheckpoints(output.output, entries);
+    },
     "session.idle": async () => {
       await refresh();
       await publishConfig();
     }
   };
-  return { hooks, extend, describe, ready, refresh, publishConfig, _ledger: () => ledger, _store: () => storePromise, budgetSnapshot, setBudget };
+  return {
+    hooks,
+    extend,
+    describe,
+    ready,
+    refresh,
+    publishConfig,
+    verifiedTaskNotice,
+    verifiedTaskEntries,
+    recoverAncestry,
+    ingestSession: async (info) => {
+      if (typeof info?.title === "string")
+        transientTitles.set(info.id, info.title.slice(0, 512));
+      if (Object.hasOwn(info || {}, "parentID"))
+        metadataParents.set(info.id, info.parentID);
+      const verified = typeof info?.directory === "string" && typeof info.projectID === "string" && await projectKeyForDirectory(info.directory) === projectKey;
+      await enqueue((current, eventID) => recordSession(current, info, {
+        eventID,
+        writerID: projectContext.instanceID || `${process.pid}`,
+        metadataVerified: verified,
+        projectKey: verified ? projectKey : null
+      }));
+    },
+    _ledger: () => ledger,
+    _store: () => storePromise,
+    budgetSnapshot,
+    setBudget
+  };
 }
 
 // index.js
@@ -4482,16 +5889,38 @@ var CostGuard = async ({ client, directory }, options) => {
   if (cfg.onBlock === "ask") {
     hooks.tool = {
       cost_guard_extend: {
-        description: "Cost guard: after user approval, add USD and/or total tokens to the session or run budget. Without amounts, session scope extends the default USD limit (or token limit in token-only mode).",
+        description: "Cost guard: after explicit user approval, add USD and/or total tokens to the session or run budget. Without amounts, session scope retains the default USD extension; token-only mode adds one active base token limit.",
         args: {
           usd: number2().positive().optional().describe("USD to add"),
           tokens: number2().int().positive().optional().describe("Total session/run tokens to add"),
-          scope: _enum(["session", "run"]).optional().describe("Budget scope; default session")
+          scope: _enum(["session", "run"]).optional().describe("Budget scope; default session"),
+          sessionID: string2().min(1).max(256).optional().describe("Optional verified child session target; requires canonical parent authority")
         },
         async execute(args, context) {
-          const result = await extend(context.sessionID, args?.usd, args?.tokens, args?.scope || "session");
-          return `cost-guard: approved ${args?.scope || "session"} budget extension recorded (${result}).
-${describe(context.sessionID)}`;
+          const requested = args?.sessionID || context.sessionID;
+          let callerMetadata, targetMetadata;
+          if (requested !== context.sessionID) {
+            const [caller, target] = await Promise.all([
+              client.session?.get?.({ path: { id: context.sessionID } }),
+              client.session?.get?.({ path: { id: requested } })
+            ]);
+            const valid = (result, id) => result && !result.error && result.data?.id === id && typeof result.data.directory === "string" && typeof result.data.projectID === "string";
+            if (!valid(caller, context.sessionID) || !valid(target, requested) || await projectKey(caller.data.directory) !== await projectKey(projectDirectory) || await projectKey(target.data.directory) !== await projectKey(projectDirectory))
+              throw new Error("cost-guard: child extension requires successful same-project caller/target metadata");
+            if (caller.data.projectID !== target.data.projectID)
+              throw new Error("cost-guard: caller and child session project IDs do not match");
+            callerMetadata = caller.data;
+            targetMetadata = target.data;
+          }
+          await controller.ready;
+          if (requested !== context.sessionID) {
+            await controller.ingestSession(callerMetadata);
+            await controller.ingestSession(targetMetadata);
+            await controller.recoverAncestry(requested);
+          }
+          const result = await extend(context.sessionID, args?.usd, args?.tokens, args?.scope || "session", requested);
+          return `cost-guard: approved ${args?.scope || "session"} budget extension recorded for ${requested} (${result}).
+${describe(requested)}`;
         }
       }
     };

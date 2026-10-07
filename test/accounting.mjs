@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { aggregate, createStore, newLedger, normalizeUsage, recordMessage, recordSession, mergeLedger, resolveActiveGuardConfig, globMatch, effectiveBudgetLimits } from "../accounting.js";
+import { aggregate, createStore, newLedger, normalizeUsage, recordMessage, recordSession, mergeLedger, resolveActiveGuardConfig, globMatch, effectiveBudgetLimits, canonicalRoot, projectKey } from "../accounting.js";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createCostGuardController, normalizeOptions } from "../lib.js";
@@ -63,15 +63,40 @@ try {
   recordMessage(tieCandidates, event("ties", "m", 0.2), { receivedAt: 20, writerID: "same", writerSeq: 2, eventID: "two" });
   assert.equal(aggregate(tieCandidates, ["ties"]).cost, 0.2, "equal receipt times use actual writer-local sequence before stable event ID");
 
+  const ancestryLedger = newLedger();
+  const projectKeyForTest = await projectKey(temp);
+  recordSession(ancestryLedger, { id: "true-root", directory: temp, parentID: null }, { metadataVerified: true, projectKey: projectKeyForTest });
+  recordSession(ancestryLedger, { id: "verified-child", directory: temp, parentID: "true-root" }, { metadataVerified: true, projectKey: projectKeyForTest });
+  recordMessage(ancestryLedger, { ...event("verified-child", "at-cap", 0), tokens: { input: 200000, output: 40000, reasoning: 10000, cache: { read: 999999, write: 0 } } });
+  const ancestry = canonicalRoot(ancestryLedger, "verified-child", projectKeyForTest);
+  const childLimits = effectiveBudgetLimits({ tokenLimit: 100000, subagentTokenLimit: 250000, agents: ["*"], exclude: ["excluded-child"] },
+    { agent: "excluded-child", sessionID: "verified-child", rootID: ancestry.id, approvals: [], ancestry });
+  assert.equal(childLimits.effectiveSessionTokenLimit, 250000, "excluded agent retains the independent child limit");
+  assert.equal(childLimits.subagentEffectiveLimit, 250000);
+  const mixedLimits = effectiveBudgetLimits({ tokenLimit: 100000, subagentTokenLimit: 250000, agents: ["*"], exclude: [] },
+    { agent: "included-child", sessionID: "verified-child", rootID: ancestry.id, approvals: [], ancestry });
+  assert.equal(mixedLimits.effectiveSessionTokenLimit, 100000, "active legacy and child caps combine by minimum");
+  assert.equal(aggregate(ancestryLedger, ["verified-child"]).totalTokens, 250000, "cache usage is excluded from the lifetime cap");
+  assert.equal(canonicalRoot(ancestryLedger, "true-root", projectKeyForTest).isRoot, true);
+  assert.equal(canonicalRoot(ancestryLedger, "unknown-child", projectKeyForTest).complete, false);
+  const messageOnly = newLedger();
+  recordMessage(messageOnly, { ...event("message-only", "m", 0), directory: temp });
+  assert.equal(canonicalRoot(messageOnly, "message-only", projectKeyForTest).complete, false,
+    "message directory alone cannot establish a verified synthetic root");
+  recordSession(ancestryLedger, { id: "unverified-root", parentID: null }, { metadataVerified: false, projectKey: projectKeyForTest });
+  recordSession(ancestryLedger, { id: "unverified-child", parentID: "unverified-root" }, { metadataVerified: true, projectKey: projectKeyForTest });
+  assert.equal(canonicalRoot(ancestryLedger, "unverified-child", projectKeyForTest).reason, "unverified-session");
+
   recordSession(ledger, { id: "root", parentID: null });
   recordSession(ledger, { id: "child1", parentID: "root" });
   recordSession(ledger, { id: "child2", parentID: "root" });
   recordMessage(ledger, { ...event("child1", "spend", 0.6), tokens: { input: 1, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } });
   recordMessage(ledger, { ...event("child2", "spend", 0.6), tokens: { input: 1, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } });
-  const client = { app: { log: async () => {} } };
-  const guard = createCostGuardController(normalizeOptions({ limit: 1, runLimit: 1, action: "block", persist: false }), client);
+  const client = { app: { log: async () => {} }, session: { get: async ({ path: { id } }) => ({ data: { id, directory: temp, projectID: "project" } }) } };
+  const guard = createCostGuardController(normalizeOptions({ limit: 1, runLimit: 1, action: "block", persist: false, agents: ["*"], runLimit: 1 }), client, temp, { projectKey: await projectKey(temp), instanceID: "root-guard" });
   await guard.ready;
-  for (const id of ["child1", "child2"]) await guard.hooks.event({ event: { type: "session.created", properties: { info: { id, parentID: "root" } } } });
+  await guard.hooks.event({ event: { type: "session.created", properties: { info: { id: "root", parentID: null, directory: temp } } } });
+  for (const id of ["child1", "child2"]) await guard.hooks.event({ event: { type: "session.created", properties: { info: { id, parentID: "root", directory: temp } } } });
   await guard.hooks.event({ event: { type: "message.updated", properties: { info: { ...event("child1", "one", 0.6), time: { updated: 2 } } } } });
   await guard.hooks.event({ event: { type: "message.updated", properties: { info: { ...event("child2", "two", 0.6), time: { updated: 2 } } } } });
   await assert.rejects(() => guard.hooks["tool.execute.before"]({ tool: "bash", sessionID: "child2" }), /active budget/);
@@ -113,7 +138,7 @@ try {
   await second.update((state) => { state.approvals.push({ id: "approval-b", sessionID: "b", dimensions: [{ tokens: 10 }] }); return state; });
   assert.equal((await first.load()).approvals.length, 2);
   const workerConfig = createCostGuardController(normalizeOptions({ limit: 2, runLimit: 1, limits: { "agent-a": 0.5 }, agents: ["*"], exclude: ["agent-b"], persist: true, stateDirectory: directory }), client,
-    temp, { projectKey: "p", instanceID: "instance" });
+    temp, { projectKey: await projectKey(temp), instanceID: "instance" });
   await workerConfig.ready;
   await workerConfig.publishConfig();
   assert.equal((await workerConfig._ledger()).configs.length, 1, "persistent guard publishes one active config lease");
@@ -183,7 +208,7 @@ try {
   await assert.rejects(() => fs.access(path.join(temp, "disabled")), { code: "ENOENT" });
 
   for (const persist of [false, true]) {
-    const recoveryOnly = createCostGuardController(normalizeOptions({ persist, stateDirectory: directory, limit: 1, action: "block" }), {
+  const recoveryOnly = createCostGuardController(normalizeOptions({ persist, stateDirectory: directory, limit: 1, action: "block" }), {
       ...client, session: { messages: async () => ({ data: [{ info: event("recover-guard", "old", 1.2) }] }) },
     }, temp, { projectKey: `recover-${persist}`, instanceID: `recover-${persist}` });
     await recoveryOnly.ready;
@@ -197,7 +222,8 @@ try {
     ...client, session: { messages: async () => ({ data: await new Promise((resolve) => { releaseHistory = resolve; }) }) },
   });
   const recoveryEvent = stalled.hooks.event({ event: { type: "message.updated", properties: { info: event("race", "m", 0.7) } } });
-  await new Promise((resolve) => setImmediate(resolve));
+  for (let attempt = 0; attempt < 20 && !releaseHistory; attempt++) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(typeof releaseHistory, "function", "recovery request started before the concurrent live event");
   const concurrentEvent = stalled.hooks.event({ event: { type: "message.updated", properties: { info: event("race", "other", 0.4) } } });
   releaseHistory([{ info: event("race", "m", 0.1) }]);
   await Promise.all([recoveryEvent, concurrentEvent]);

@@ -73,13 +73,15 @@ export function recordSession(ledger, info, event = {}) {
   const prior = ledger.sessions[info.id] || { parentID: null, startAt: null, metadata: {} };
   const timestamp = Number.isFinite(info.time?.updated) ? info.time.updated : Number.isFinite(info.time?.created) ? info.time.created : event.receivedAt ?? Date.now();
   const fields = {};
-  if (Object.hasOwn(info, "parentID")) fields.parentID = info.parentID;
+  const metadataVerified = event.metadataVerified === true;
+  if (metadataVerified) fields.parentID = Object.hasOwn(info, "parentID") ? info.parentID : null;
   if (Number.isFinite(info.time?.created)) fields.startAt = info.time.created;
   for (const field of ["projectID", "directory"]) if (Object.hasOwn(info, field) && typeof info[field] === "string") fields[field] = info[field];
   const candidates = uniqueCandidates([...(prior.candidates || []),
     { fields, timestamp, receivedAt: event.receivedAt ?? Date.now(), publishedAt: event.publishedAt ?? Date.now(), updatedAt: Number.isFinite(info.time?.updated) ? info.time.updated : null,
       revision: Number.isFinite(info.revision) ? info.revision : null,
       versionKind: Number.isFinite(info.time?.updated) ? "updated" : Number.isFinite(info.revision) ? "revision" : null,
+      metadataVerified, projectKey: event.projectKey || info.projectID || null,
       writerID: event.writerID || "local", writerSeq: event.writerSeq || 0, eventID: event.eventID || randomUUID() }]);
   ledger.sessions[info.id] = { ...prior, metadata: { ...prior.metadata }, candidates };
   for (const field of new Set(candidates.flatMap((candidate) => Object.keys(candidate.fields || {})))) {
@@ -87,6 +89,10 @@ export function recordSession(ledger, info, event = {}) {
     if (selected) ledger.sessions[info.id][field] = selected.fields[field];
   }
   ledger.sessions[info.id].candidates = candidates;
+  const selected = winner(candidates);
+  ledger.sessions[info.id].metadataVerified = selected.metadataVerified === true;
+  ledger.sessions[info.id].projectKey = selected.projectKey || null;
+  if (fields.directory) ledger.sessions[info.id].directory = fields.directory;
 }
 export function tombstoneSession(ledger, id, event = {}) {
   if (typeof id !== "string" || !id) return;
@@ -125,7 +131,9 @@ export function normalizeLedger(input) {
       const selected = winner(unique.filter((candidate) => Object.hasOwn(candidate.fields || {}, field)));
       if (selected) resolved[field] = selected.fields[field];
     }
-    ledger.sessions[id] = { parentID: null, startAt: null, metadata: {}, ...resolved, candidates: unique.sort(receiptOrder) };
+    const selected = winner(unique);
+    ledger.sessions[id] = { parentID: null, startAt: null, metadata: {}, ...resolved, metadataVerified: selected.metadataVerified === true,
+      projectKey: selected.projectKey || null, candidates: unique.sort(receiptOrder) };
   }
   ledger.approvals = [...(input.approvals || [])];
   ledger.configs = [...(input.configs || [])];
@@ -159,7 +167,9 @@ export function mergeLedger(...sources) {
       const selected = winner(candidates.filter((candidate) => Object.hasOwn(candidate.fields || {}, field)));
       if (selected) resolved[field] = selected.fields[field];
     }
-    ledger.sessions[id] = { parentID: null, startAt: null, metadata: {}, ...resolved, candidates: candidates.sort(receiptOrder) };
+    const selected = winner(candidates);
+    ledger.sessions[id] = { parentID: null, startAt: null, metadata: {}, ...resolved, metadataVerified: selected.metadataVerified === true,
+      projectKey: selected.projectKey || null, candidates: candidates.sort(receiptOrder) };
   }
   ledger.approvals = [...approvals.values()].sort((a, b) => String(a.id).localeCompare(String(b.id)));
   ledger.configs = [...configs.values()].sort((a, b) => a.eventID.localeCompare(b.eventID));
@@ -211,9 +221,23 @@ export function descendants(ledger, root) {
   return result;
 }
 export function canonicalRoot(ledger, id) {
-  const value = normalizeLedger(ledger), seen = new Set(); let current = id;
-  while (value.sessions[current]?.parentID) { if (seen.has(current)) return { id: current, complete: false }; seen.add(current); current = value.sessions[current].parentID; }
-  return { id: current, complete: !seen.has(current) };
+  return canonicalAncestry(ledger, id);
+}
+export function canonicalAncestry(ledger, id, expectedProjectKey) {
+  const value = normalizeLedger(ledger), seen = new Set(); let current = id, depth = 0, project = null;
+  while (true) {
+    if (seen.has(current)) return { id: current, complete: false, reason: "cycle", depth, isRoot: false };
+    seen.add(current);
+    const session = value.sessions[current];
+    if (!session || session.metadataVerified !== true) return { id: current, complete: false, reason: "unverified-session", depth, isRoot: false };
+    if (typeof session.projectKey !== "string" || !session.projectKey) return { id: current, complete: false, reason: "missing-project-identity", depth, isRoot: false };
+    project ||= session.projectKey;
+    if (session.projectKey !== project || (expectedProjectKey && session.projectKey !== expectedProjectKey && session.directory !== expectedProjectKey)) return { id: current, complete: false, reason: "project-mismatch", depth, isRoot: false };
+    if (!Object.hasOwn(session, "parentID")) return { id: current, complete: false, reason: "missing-parent-metadata", depth, isRoot: false };
+    if (session.parentID == null) return { id: current, complete: true, reason: null, depth, isRoot: depth === 0, projectKey: project };
+    if (typeof session.parentID !== "string" || !session.parentID) return { id: current, complete: false, reason: "invalid-parent-metadata", depth, isRoot: false };
+    current = session.parentID; depth++;
+  }
 }
 export function resolveActiveGuardConfig(ledger, { projectKey, hostname = os.hostname(), now = Date.now(), isAlive } = {}) {
   const alive = isAlive || ((pid) => { try { process.kill(pid, 0); return true; } catch (error) { return error.code !== "ESRCH"; } });
@@ -230,21 +254,63 @@ export function resolveActiveGuardConfig(ledger, { projectKey, hostname = os.hos
   return { available: true, conflict: false, config: [...latestByInstance.values()].sort((a, b) => a.instanceID.localeCompare(b.instanceID))[0].config,
     activeInstances: [...latestByInstance.values()] };
 }
-export function effectiveBudgetLimits(config, { agent, sessionID, rootID, approvals = [] }) {
+export function effectiveBudgetLimits(config, { agent, sessionID, rootID, approvals = [], ancestry = { complete: false, reason: "unverified-session" } }) {
   const matches = (pattern) => agent == null ? pattern === "*" : globMatch(pattern, agent);
   const resolve = (fallback, perAgent) => { for (const [pattern, value] of perAgent || []) if (matches(pattern)) return value; return fallback; };
   const applies = !(config.exclude || []).some(matches) && (!(config.agents || []).length || (config.agents || []).some(matches));
   const extra = (scope, id, key) => approvals.filter((item) => item.scope === scope && item.sessionID === id)
     .flatMap((item) => item.dimensions || []).reduce((sum, dimension) => sum + (dimension[key] || 0), 0);
   const usd = config.usdEnabled === false || !applies ? null : resolve(config.sessionLimit, config.limits);
-  const tokens = !applies || !Number.isFinite(config.tokenLimit) ? null : config.tokenLimit;
+  const tokens = !applies || !Number.isSafeInteger(config.tokenLimit) ? null : config.tokenLimit;
   const sessionExtensionUsd = extra("session", sessionID, "usd"), sessionExtensionTokens = extra("session", sessionID, "tokens");
   const runExtensionUsd = extra("run", rootID, "usd"), runExtensionTokens = extra("run", rootID, "tokens");
+  const subagentBaseLimit = ancestry.complete && !ancestry.isRoot && Number.isSafeInteger(config.subagentTokenLimit) && config.subagentTokenLimit > 0
+    ? config.subagentTokenLimit : null;
+  const tokenBases = [tokens, subagentBaseLimit].filter((limit) => limit != null);
+  const sessionExtensionActive = (tokens != null || subagentBaseLimit != null) ? sessionExtensionTokens : 0;
+  const effectiveSessionTokenLimit = tokenBases.length ? Math.min(...tokenBases) + sessionExtensionActive : null;
   return { applies, excluded: (config.exclude || []).some(matches), sessionExtensionUsd, sessionExtensionTokens, runExtensionUsd, runExtensionTokens,
+     ancestryComplete: ancestry.complete, ancestryReason: ancestry.reason || null, subagentApplicable: ancestry.complete && !ancestry.isRoot,
+     subagentBaseLimit, subagentEffectiveLimit: subagentBaseLimit == null ? null : subagentBaseLimit + sessionExtensionActive,
+     subagentCapAvailable: subagentBaseLimit != null,
+     activeTokenDimensions: { legacySession: tokens, subagent: subagentBaseLimit, effectiveSession: effectiveSessionTokenLimit },
+     legacyTokenLimit: tokens, effectiveSessionTokenLimit,
     sessionUsdLimit: usd == null ? null : usd + sessionExtensionUsd,
-    sessionTokenLimit: tokens == null ? null : tokens + sessionExtensionTokens,
+    sessionTokenLimit: effectiveSessionTokenLimit,
     runUsdLimit: config.usdEnabled === false || !Number.isFinite(config.runLimit) ? null : config.runLimit + runExtensionUsd,
-    runTokenLimit: !Number.isFinite(config.runTokenLimit) ? null : config.runTokenLimit + runExtensionTokens };
+     runTokenLimit: !Number.isFinite(config.runTokenLimit) ? null : config.runTokenLimit + runExtensionTokens };
+}
+export function formatSubagentCheckpoint({ id, title, totalTokens, input, output, reasoning, limit, approvalTokens }) {
+  const marker = `<!-- cost-guard-checkpoint:${id} -->`;
+  const safeTitle = typeof title === "string" ? ` (${title.replace(/[<>]/g, "").slice(0, 80)})` : "";
+  return `${marker}\nSubagent checkpoint: ${id}${safeTitle}; ${totalTokens}/${limit} lifetime tokens; input ${input} + output ${output} + reasoning ${reasoning} (cache excluded). Ask the user: (1) Evaluate stuck first: inspect available task results, prior errors, repeated failed checks, and evidence of no progress; state only supported findings and recommend Continue, Stop, or a distinct fresh attempt; (2) Continue only after approval, using cost_guard_extend({tokens:${approvalTokens}, sessionID:"${id}"}); or (3) Stop. Evaluation does not approve or unlock. Get final user approval before any extension or restart. A fresh attempt has a new session, not erased usage or bypassed run caps; token extension may leave USD/run blockers active.`;
+}
+export function appendSubagentCheckpoints(existing = "", entries = [], { limit = 8, maxChars = 6000 } = {}) {
+  const original = typeof existing === "string" ? existing : "";
+  const overflowPattern = /\n?<!-- cost-guard-checkpoint-overflow:[^>]+ -->[^\n]*(?:\n|$)/g;
+  const source = original.replace(overflowPattern, "");
+  const markerPattern = /<!-- cost-guard-checkpoint:([^ >]+) -->/g;
+  const visible = new Set([...source.matchAll(markerPattern)].map((match) => match[1]));
+  if (original.match(/<!-- cost-guard-checkpoint-overflow:\d+:\d+:\d+ -->/)) return original;
+  const unique = [...new Map(entries.map((entry) => [entry.id, entry])).values()];
+  const unseen = unique.filter((entry) => !visible.has(entry.id));
+  const visibleSlots = Math.max(0, limit - visible.size);
+  const selected = [];
+  const render = () => selected.map(formatSubagentCheckpoint);
+  const summaryFor = () => {
+    const shown = visible.size + selected.length;
+    const omitted = unique.length - shown;
+    return omitted > 0
+      ? `<!-- cost-guard-checkpoint-overflow:${limit}:${unique.length}:${shown} --> Checkpoint notice bounded: showing ${shown} of ${unique.length} over-budget verified descendants; ${omitted} not shown.`
+      : "";
+  };
+  for (const entry of unseen.slice(0, visibleSlots)) {
+    selected.push(entry);
+    const proposed = [...render(), summaryFor()].filter(Boolean).join("\n");
+    if (proposed.length > maxChars) selected.pop();
+  }
+  const suffix = [...render(), summaryFor()].filter(Boolean).join("\n");
+  return suffix ? `${source}${source ? "\n" : ""}${suffix}` : source;
 }
 export function globMatch(pattern, value) {
   if (typeof pattern !== "string" || typeof value !== "string") return false;
