@@ -10,7 +10,7 @@ export interface CostGuardOptions extends PluginOptions {
   limits?: LimitSpec;
   /** "warn" logs only; "block" caps output and stops tool calls. Default: "warn" */
   action?: "warn" | "block";
-  /** Fraction of a session's limit at which a warning is logged (0..1). Default: 0.8 */
+  /** Fraction of a session's limit at which a warning is logged (0, 1]. Default: 0.8 */
   warnRatio?: number;
   /** Agent globs to enforce. Default: ["*"] */
   agents?: string[];
@@ -18,24 +18,34 @@ export interface CostGuardOptions extends PluginOptions {
   exclude?: string[];
   /** Output token cap applied once blocked. Default: 1 */
   maxOutputTokensOnBlock?: number;
-  /** On limit: "stop" aborts immediately; "ask" instructs the agent to ask you, then extend. Default: "stop" */
+  /** On limit: "stop" caps future output and denies tools; "ask" requires a one-use native question approval before extending. Default: "stop" */
   onBlock?: "stop" | "ask";
   /** Emit logs (errors always log). Default: true */
   notify?: boolean;
   /** Total input + output + reasoning tokens per session. Opt-in. */
-  tokenLimit?: number;
+  tokenLimit?: number | null;
   /** Lifetime input + output + reasoning cap for each verified child session instance; root exempt, session totals include repeated context, cache excluded. Opt-in. */
-  subagentTokenLimit?: number;
+  subagentTokenLimit?: number | null;
   /** Root run USD limit across descendants, including excluded agents. Opt-in. */
-  runLimit?: number;
+  runLimit?: number | null;
   /** Root run input + output + reasoning token limit. Opt-in. */
-  runTokenLimit?: number;
+  runTokenLimit?: number | null;
   /** Enforce USD limits. Default: true */
   usdEnabled?: boolean;
   /** Persist normalized usage under project-isolated state storage. Default: true */
   persist?: boolean;
   /** Optional private state directory override. */
-  stateDirectory?: string;
+  stateDirectory?: string | null;
+  /** Page size for host-cursor history recovery (1..500). Default: 500. */
+  historyPageSize?: number;
+  /** Bounded recovery pages (1..1000). Default: 100. */
+  historyMaxPages?: number;
+  /** Bound each host request (1..60000 ms). Default: 10000. */
+  historyTimeoutMs?: number;
+  /** Incomplete history blocks tools by default; warn explicitly allows lower-bound usage. */
+  incompleteHistory?: "block" | "warn";
+  /** Throttle unchanged config lease publication (1..240000 ms). Default: 60000. */
+  configRefreshMs?: number;
 }
 
 export interface ResolvedOptions {
@@ -55,6 +65,11 @@ export interface ResolvedOptions {
   usdEnabled: boolean;
   persist: boolean;
   stateDirectory: string | null;
+  historyPageSize: number;
+  historyMaxPages: number;
+  historyTimeoutMs: number;
+  incompleteHistory: "block" | "warn";
+  configRefreshMs: number;
 }
 
 export declare function globMatch(pattern: string, value: string): boolean;
@@ -81,7 +96,7 @@ export declare function createCostGuardController(
   client: { app: { log: (input: { body: Record<string, unknown> }) => Promise<unknown> } },
   projectDirectory?: string,
   projectContext?: { projectKey?: string; instanceID?: string },
-): { hooks: Hooks; extend: (sessionID: string, usd?: number, tokens?: number, scope?: "session" | "run", targetSessionID?: string) => Promise<number | string>; describe: (sessionID: string) => string; ready: Promise<void>; refresh(): Promise<void>; recoverAncestry(sessionID: string): Promise<{ complete: boolean; id: string; reason?: string }>; ingestSession(info: Record<string, unknown>): Promise<void>; _ledger(): object };
+): { hooks: Hooks; extend: (sessionID: string, usd?: number, tokens?: number, scope?: "session" | "run", targetSessionID?: string) => Promise<number | string>; requestExtension(sessionID: string, usd?: number, tokens?: number, scope?: "session" | "run", targetSessionID?: string): Promise<{ questions: object[] }>; describe: (sessionID: string) => string; ready: Promise<void>; refresh(): Promise<void>; recoverAncestry(sessionID: string): Promise<{ complete: boolean; id: string; reason?: string }>; ingestSession(info: Record<string, unknown>): Promise<void>; _ledger(): object };
 
 export declare const CostGuard: Plugin;
 export default CostGuard;

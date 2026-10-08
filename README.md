@@ -57,18 +57,24 @@ The preset is `action: "block"`, `onBlock: "ask"`, `tokenLimit: 500000`, and `su
 |---|---|---|
 | `limit` | `5` | USD per session, or a per-agent map `{ "agentGlob": usd, "*": usd }` |
 | `action` | `"warn"` | `warn` logs; `block` caps output and stops tools |
-| `onBlock` | `"stop"` | `stop` ends the session; `ask` prompts you first |
+| `onBlock` | `"stop"` | `stop` caps future output and denies tools; `ask` keeps native approval recovery available |
 | `warnRatio` | `0.8` | fraction of an active budget threshold that triggers one warning; dropping below all active thresholds rearms it |
 | `agents` / `exclude` | `["*"]` / `[]` | agent globs to enforce or skip |
 | `maxOutputTokensOnBlock` | `1` | output cap once blocked |
 | `notify` | `true` | emit logs |
 | `tokenLimit` | unset | session budget tokens: input + output + reasoning (cache excluded) |
 | `subagentTokenLimit` | unset | lifetime verified-child cap for input + output + reasoning; root exempt |
-| `runLimit` | unset | USD cap across the root session and all descendants |
-| `runTokenLimit` | unset | run-wide input + output + reasoning token cap |
+| `runLimit` | `null` (unlimited) | USD cap across the root session and all descendants |
+| `runTokenLimit` | `null` (unlimited) | run-wide input + output + reasoning token cap |
 | `usdEnabled` | `true` | enable USD enforcement; tokens still enforce independently |
 | `persist` | `true` | persist normalized usage/ancestry/approvals across restart |
 | `stateDirectory` | project-isolated default | optional private directory override |
+| `historyPageSize` / `historyMaxPages` | `500` / `100` | recovery page size and bound; uses host `X-Next-Cursor` |
+| `historyTimeoutMs` | `10000` | abort each SDK history/metadata request after this bound; maximum 60000 ms |
+| `incompleteHistory` | `"block"` | block normal tools with incomplete recovery; `warn` explicitly permits known lower-bound usage |
+| `configRefreshMs` | `60000` | throttle unchanged lease publication; maximum 240000 ms |
+
+Invalid effective options, unknown keys, malformed files, and missing explicitly selected files fail with a named configuration error. Only a missing optional default file is ignored. Both run limits can be declared as `null` for unlimited usage; when configured, either dimension can block first.
 
 Env: `OPENCODE_COST_GUARD_LIMIT`, `OPENCODE_COST_GUARD_ACTION`, `OPENCODE_COST_GUARD_CONFIG`.
 
@@ -80,7 +86,16 @@ Per-agent limits use the first matching glob, so list specific agents before `*`
 
 ## On the limit
 
-`block` + `stop` ends the session. `block` + `ask` stops normal tools and asks you via the `question` tool. The agent asks whether to continue and how much extra USD to grant, then calls `cost_guard_extend` with that amount:
+`block` + `stop` caps future output and denies tools. `block` + `ask` denies normal tools while preserving the native `question` tool and `cost_guard_extend`.
+Only a verified root session can extend its own or a verified descendant's budget:
+
+1. Call `cost_guard_extend` with the exact target, scope, and increment. No budget changes; it returns a native question with a unique challenge.
+2. Ask that exact question with the native `question` tool. Rejecting or dismissing it grants nothing.
+3. After the user selects `Approve`, retry the same extension unchanged. The one-use receipt expires after five minutes and cannot authorize another amount, target, or scope.
+
+Subagents return the blocker to their parent; they cannot extend themselves. User approval is validated from native question events or the native question result, rather than inferred from tool arguments or prose. The host's question reply channel is the trust boundary; no native question capability means no extension. Evaluation alone grants nothing.
+
+Example extension intent:
 
 ```
 cost-guard: session limit is now 13.00 USD.
@@ -92,7 +107,11 @@ cost-guard: session limit is now 13.00 USD.
 
 The `stop` mode caps future generated output at the smaller of the existing provider cap and `maxOutputTokensOnBlock`; it cannot undo dispatched requests or cap input/reasoning on every provider. The practical `ask` mode leaves generation uncapped for recovery; a child checkpoint directs the parent to ask the user: (1) Evaluate stuck first by inspecting available task results, prior errors, repeated failed checks, and evidence of no progress, then explain the evidence and recommend Continue or Stop/a distinct fresh attempt, (2) Continue with the stated token increment using `cost_guard_extend` and the child `sessionID`, or (3) Stop. Evaluation is a recommendation, not approval or an unlock; obtain final user approval before extension or restart. A token extension may leave USD/session or run blockers active. Task-return notices depend on the host invoking `tool.execute.after`, which may not occur on a failed task; rejection text also contains the checkpoint. This is not a guaranteed modal, provider cancellation, or billing guarantee. In-flight usage can overshoot.
 
-Token counts are OpenCode telemetry. Incomplete USD records contribute no fabricated cost, but known costs remain a lower bound and can still trigger a cap; below the cap, unknown usage is never treated as safe. Unknown USD does not disable token checks. Persistent state contains normalized usage, IDs, ancestry, timestamps, and approvals only—no prompts or session titles. Project/worktree-keyed immutable journal events publish through unique temporary files and atomic rename; readers ignore leftovers. Replay is idempotent and permutation-invariant. Journal limits fail explicitly; this release does not compact/delete history. `persist: false` performs no persistence. Active configuration visibility uses per-instance five-minute leases; cross-process aggregate enforcement remains non-transactional. Existing installs and global config are untouched: source edits do not update installed pinned plugin versions. Install a future release or build/copy the local bundle, then restart OpenCode.
+Token counts are OpenCode telemetry. Incomplete USD records contribute no fabricated cost, but known costs remain a lower bound and can still trigger a cap; below the cap, unknown telemetry remains a lower bound and is not a billing guarantee. Unknown USD does not disable token checks. Persistent state contains normalized usage, IDs, ancestry, timestamps, and approvals only—no prompts or session titles. Project/worktree-keyed immutable journal events publish through unique temporary files and atomic rename; readers ignore leftovers. Replay is idempotent and permutation-invariant. Journal limits fail explicitly; this release does not compact/delete history. `persist: false` performs no persistence. Active configuration visibility uses per-instance five-minute leases; cross-process aggregate enforcement remains non-transactional. Existing installs and global config are untouched: source edits do not update installed pinned plugin versions. Install a future release or build/copy the local bundle, then restart OpenCode.
+
+History recovery retains known usage and follows the host's opaque `X-Next-Cursor` header, within configured bounds. A full page with neither response headers nor a cursor, repeated cursors, or API errors mark coverage incomplete; retries can recover after the underlying error is repaired. Current host cursor behavior was checked against OpenCode 1.18.30. The guard does not fabricate a cursor from a message ID.
+
+Store loads return immutable snapshots. Each store scans journal names and replays only unseen immutable events; new events from other writers are still incorporated. Removed previously seen events fail explicitly. Do not edit published event files. Session totals are indexed per snapshot; revisions invalidate mutable-ledger indexes. Unchanged configuration publication is throttled. No compaction or history deletion is performed.
 
 Journal events contain only newly published message/session candidates, approvals, or configuration changes; they do not republish cumulative ledger snapshots. Agent selectors retain full glob behavior (`*` anywhere and single-character `?`).
 

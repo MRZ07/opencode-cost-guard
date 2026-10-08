@@ -6,7 +6,9 @@ import { fileURLToPath } from "node:url";
 import { aggregate, createStore, newLedger, normalizeUsage, recordMessage, recordSession, mergeLedger, resolveActiveGuardConfig, globMatch, effectiveBudgetLimits, canonicalRoot, projectKey } from "../accounting.js";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { createCostGuardController, normalizeOptions } from "../lib.js";
+import { createCostGuardController, normalizeOptions as rawNormalizeOptions } from "../lib.js";
+
+const normalizeOptions = (options) => rawNormalizeOptions({ incompleteHistory: "warn", ...options });
 
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), "cost-guard-accounting-"));
 try {

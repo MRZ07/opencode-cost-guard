@@ -11,6 +11,20 @@ export const MAX_STATE_BYTES = 8 * 1024 * 1024;
 export const MAX_JOURNAL_RECORDS = 100_000;
 export const MAX_JOURNAL_BYTES = 64 * 1024 * 1024;
 export const CONFIG_LEASE_MS = 5 * 60_000;
+const views = new WeakMap();
+const invalidateView = (ledger) => views.delete(ledger);
+const view = (ledger) => {
+  let cached = views.get(ledger);
+  if (!cached) { cached = { ledger: normalizeLedger(ledger), totals: null }; views.set(ledger, cached); }
+  return cached;
+};
+const freeze = (value) => {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) freeze(child);
+    Object.freeze(value);
+  }
+  return value;
+};
 const finite = (n) => typeof n === "number" && Number.isFinite(n) && n >= 0;
 
 export function normalizeUsage(info = {}) {
@@ -63,12 +77,14 @@ export function recordMessage(ledger, info, { recovered = false, receivedAt = Da
   return mergeRecord(ledger, record);
 }
 export function mergeRecord(target, incoming) {
+  invalidateView(target);
   const key = messageKey(incoming.sessionID, incoming.id);
   const prior = target.messages[key];
   target.messages[key] = winner([...(prior ? [prior] : []), incoming]);
   return target.messages[key].eventID === incoming.eventID;
 }
 export function recordSession(ledger, info, event = {}) {
+  invalidateView(ledger);
   if (!info || typeof info.id !== "string" || !info.id) return;
   const prior = ledger.sessions[info.id] || { parentID: null, startAt: null, metadata: {} };
   const timestamp = Number.isFinite(info.time?.updated) ? info.time.updated : Number.isFinite(info.time?.created) ? info.time.created : event.receivedAt ?? Date.now();
@@ -200,31 +216,52 @@ export function deltaLedger(before, after) {
   if (JSON.stringify(before.budget) !== JSON.stringify(after.budget)) delta.budget = after.budget;
   return delta;
 }
+const emptyTotals = () => ({ cost: 0, costKnownLowerBound: 0, costAvailable: true, tokensComplete: true,
+  input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+  turns: 0, first: null, last: null, models: new Set() });
 export function aggregate(ledger, sessionIDs) {
-  const ids = new Set(sessionIDs), out = { cost: 0, costKnownLowerBound: 0, costAvailable: true, tokensComplete: true, input: 0, output: 0, reasoning: 0,
-    cacheRead: 0, cacheWrite: 0, totalTokens: 0, turns: 0, first: null, last: null, models: new Set() };
-  const normalized = normalizeLedger(ledger);
-  for (const record of Object.values(normalized.messages)) if (ids.has(record.sessionID)) {
-    out.turns++; out.costAvailable &&= record.usage.costKnown; if (record.usage.costKnown) out.cost += record.usage.cost;
-    out.tokensComplete &&= record.usage.tokensComplete; out.input += record.usage.tokens.input; out.output += record.usage.tokens.output;
-    out.reasoning += record.usage.tokens.reasoning; out.cacheRead += record.usage.tokens.cacheRead; out.cacheWrite += record.usage.tokens.cacheWrite;
-    out.totalTokens += record.usage.budgetTokens;
-    if (record.createdAt != null) { out.first = out.first == null ? record.createdAt : Math.min(out.first, record.createdAt); out.last = out.last == null ? record.createdAt : Math.max(out.last, record.createdAt); }
-    if (record.model) out.models.add(record.model);
+  const cached = view(ledger);
+  if (!cached.totals) {
+    cached.totals = new Map();
+    for (const record of Object.values(cached.ledger.messages)) {
+      const out = cached.totals.get(record.sessionID) || emptyTotals();
+      out.turns++; out.costAvailable &&= record.usage.costKnown;
+      if (record.usage.costKnown) out.cost += record.usage.cost;
+      out.tokensComplete &&= record.usage.tokensComplete;
+      for (const key of ["input", "output", "reasoning", "cacheRead", "cacheWrite"]) out[key] += record.usage.tokens[key];
+      out.totalTokens += record.usage.budgetTokens;
+      if (record.createdAt != null) {
+        out.first = out.first == null ? record.createdAt : Math.min(out.first, record.createdAt);
+        out.last = out.last == null ? record.createdAt : Math.max(out.last, record.createdAt);
+      }
+      if (record.model) out.models.add(record.model);
+      cached.totals.set(record.sessionID, out);
+    }
   }
-  out.costKnownLowerBound = out.cost; return out;
+  const out = emptyTotals();
+  for (const id of new Set(sessionIDs)) {
+    const item = cached.totals.get(id);
+    if (!item) continue;
+    for (const key of ["cost", "input", "output", "reasoning", "cacheRead", "cacheWrite", "totalTokens", "turns"]) out[key] += item[key];
+    out.costAvailable &&= item.costAvailable; out.tokensComplete &&= item.tokensComplete;
+    if (item.first != null) out.first = out.first == null ? item.first : Math.min(out.first, item.first);
+    if (item.last != null) out.last = out.last == null ? item.last : Math.max(out.last, item.last);
+    for (const model of item.models) out.models.add(model);
+  }
+  out.costKnownLowerBound = out.cost;
+  return out;
 }
 export function descendants(ledger, root) {
-  const value = normalizeLedger(ledger), result = [], seen = new Set(), stack = [root];
+  const value = view(ledger).ledger, result = [], seen = new Set(), stack = [root];
   while (stack.length) { const id = stack.pop(); if (seen.has(id)) continue; seen.add(id); result.push(id);
     for (const [child, session] of Object.entries(value.sessions)) if (session.parentID === id && !seen.has(child)) stack.push(child); }
   return result;
 }
-export function canonicalRoot(ledger, id) {
-  return canonicalAncestry(ledger, id);
+export function canonicalRoot(ledger, id, expectedProjectKey) {
+  return canonicalAncestry(ledger, id, expectedProjectKey);
 }
 export function canonicalAncestry(ledger, id, expectedProjectKey) {
-  const value = normalizeLedger(ledger), seen = new Set(); let current = id, depth = 0, project = null;
+  const value = view(ledger).ledger, seen = new Set(); let current = id, depth = 0, project = null;
   while (true) {
     if (seen.has(current)) return { id: current, complete: false, reason: "cycle", depth, isRoot: false };
     seen.add(current);
@@ -331,28 +368,53 @@ export async function createStore({ directory, filename, projectDirectory = proc
   const journalDir = path.join(base, `${project}-${filename}.journal`);
   const legacyFile = path.join(base, `${project}-${filename}`);
   if (persist) await ensureDirectory(journalDir);
-  const read = async () => {
+  // Published event files are immutable. Scan names each time; replay only unseen events.
+  let cached = freeze(newLedger()), seen = new Map(), bytes = 0, legacySignature = null;
+  let reading = Promise.resolve();
+  const stats = { eventReads: 0, fullReplays: 0 };
+  const readOnce = async () => {
     if (!persist) return newLedger();
     const names = await fs.readdir(journalDir).catch((error) => { if (error.code === "ENOENT") return []; throw error; });
     const events = names.filter((name) => name.endsWith(".event")).sort();
     if (events.length > MAX_JOURNAL_RECORDS) throw new Error(`accounting journal exceeds ${MAX_JOURNAL_RECORDS} events; usage is incomplete`);
-    let bytes = 0; const ledgers = [];
+    const present = new Set(events);
+    for (const name of seen.keys()) if (!present.has(name)) throw new Error("accounting journal event disappeared; usage is incomplete");
+    let signature = "absent", legacy = null;
     try {
-      const legacyStat = await fs.stat(legacyFile);
-      if (legacyStat.size > MAX_STATE_BYTES) throw new Error("legacy accounting snapshot exceeds 8 MiB");
-      ledgers.push(normalizeLedger(JSON.parse(await fs.readFile(legacyFile, "utf8"))));
+      const stat = await fs.stat(legacyFile);
+      if (stat.size > MAX_STATE_BYTES) throw new Error("legacy accounting snapshot exceeds 8 MiB");
+      signature = `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.ino}`;
+      if (signature !== legacySignature) legacy = normalizeLedger(JSON.parse(await fs.readFile(legacyFile, "utf8")));
     } catch (error) { if (error.code !== "ENOENT") throw new Error(`cannot import legacy snapshot ${legacyFile}: ${error.message}`, { cause: error }); }
+    const reset = signature !== legacySignature;
+    const additions = [], sizes = new Map();
+    let nextBytes = reset ? 0 : bytes;
     for (const name of events) {
-      const file = path.join(journalDir, name), stat = await fs.stat(file); bytes += stat.size;
-      if (bytes > MAX_JOURNAL_BYTES) throw new Error(`accounting journal exceeds ${MAX_JOURNAL_BYTES} bytes; usage is incomplete`);
-      let event; try { event = JSON.parse(await fs.readFile(file, "utf8")); } catch (error) { throw new Error(`invalid journal event ${name}: ${error.message}`, { cause: error }); }
+      if (!reset && seen.has(name)) continue;
+      const file = path.join(journalDir, name), stat = await fs.stat(file);
+      nextBytes += stat.size;
+      if (nextBytes > MAX_JOURNAL_BYTES) throw new Error(`accounting journal exceeds ${MAX_JOURNAL_BYTES} bytes; usage is incomplete`);
+      if (stat.size > MAX_STATE_BYTES) throw new Error("accounting journal event exceeds 8 MiB");
+      let event;
+      try { event = JSON.parse(await fs.readFile(file, "utf8")); }
+      catch (error) { throw new Error(`invalid journal event ${name}: ${error.message}`, { cause: error }); }
       if (event.version !== JOURNAL_VERSION || !event.payload || typeof event.eventID !== "string") throw new Error(`invalid journal event schema: ${name}`);
-      ledgers.push(event.payload);
+      stats.eventReads++;
+      additions.push(event.payload); sizes.set(name, stat.size);
     }
-    return mergeLedger(...ledgers);
+    // Commit the replay cache only after every new event has passed validation.
+    if (reset || additions.length) cached = freeze(mergeLedger(reset ? legacy : cached, ...additions));
+    if (reset) { seen = new Map(); stats.fullReplays++; }
+    for (const [name, size] of sizes) seen.set(name, size);
+    bytes = nextBytes; legacySignature = signature;
+    return cached;
+  };
+  const read = () => {
+    reading = reading.catch(() => {}).then(readOnce);
+    return reading;
   };
   return {
-    file: journalDir, load: read, replaceFromDisk: read,
+    file: journalDir, load: read, replaceFromDisk: read, stats: () => ({ ...stats }),
     async append(event) {
       if (!persist) return;
       const eventID = event.eventID || randomUUID(), name = `${eventID}-${randomUUID()}.event`, final = path.join(journalDir, name);

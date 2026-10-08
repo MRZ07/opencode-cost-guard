@@ -7,7 +7,7 @@
  * matching opencode's own plugin examples.)
  */
 import { z } from "zod";
-import { createCostGuardController, normalizeOptions } from "./lib.js";
+import { createCostGuardController, normalizeOptions, guardRequest } from "./lib.js";
 import { projectKey } from "./accounting.js";
 import { randomUUID } from "node:crypto";
 
@@ -19,16 +19,21 @@ async function loadFileOptions() {
       process.env.OPENCODE_COST_GUARD_CONFIG ||
       (process.env.HOME ? `${process.env.HOME}/.config/opencode/cost-guard.json` : null);
     if (!p) return null;
-    return JSON.parse(await fs.readFile(p, "utf8"));
-  } catch {
-    return null;
+    const parsed = JSON.parse(await fs.readFile(p, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("configuration must be an object");
+    return parsed;
+  } catch (error) {
+    if (error.code === "ENOENT" && !process.env.OPENCODE_COST_GUARD_CONFIG) return null;
+    throw new Error(`cost-guard: cannot load configuration: ${error.message}`, { cause: error });
   }
 }
 
 /** @type {import("@opencode-ai/plugin").Plugin} */
 export const CostGuard = async ({ client, directory }, options) => {
   const fileOptions = await loadFileOptions();
-  const cfg = normalizeOptions({ ...(fileOptions || {}), ...(options || {}) });
+  const merged = { ...(fileOptions || {}), ...(options || {}) };
+  if (Object.hasOwn(options || {}, "limit") && !Object.hasOwn(options || {}, "limits")) delete merged.limits;
+  const cfg = normalizeOptions(merged);
   const projectDirectory = directory?.worktree || directory?.project || directory || process.cwd();
   const key = await projectKey(projectDirectory);
   const controller = createCostGuardController(cfg, client, projectDirectory, { projectKey: key, instanceID: randomUUID() });
@@ -43,7 +48,7 @@ export const CostGuard = async ({ client, directory }, options) => {
     hooks.tool = {
       cost_guard_extend: {
         description:
-          "Cost guard: after explicit user approval, add USD and/or total tokens to the session or run budget. " +
+          "Cost guard: root-only budget extension. First call returns an exact native question; ask it with question, then retry unchanged after approval. " +
           "Without amounts, session scope retains the default USD extension; token-only mode adds one active base token limit.",
         args: {
           usd: z.number().positive().optional().describe("USD to add"),
@@ -56,8 +61,8 @@ export const CostGuard = async ({ client, directory }, options) => {
           let callerMetadata, targetMetadata;
           if (requested !== context.sessionID) {
             const [caller, target] = await Promise.all([
-              client.session?.get?.({ path: { id: context.sessionID } }),
-              client.session?.get?.({ path: { id: requested } }),
+              guardRequest((input, settings) => client.session?.get?.(input, settings), { path: { id: context.sessionID } }, cfg.historyTimeoutMs),
+              guardRequest((input, settings) => client.session?.get?.(input, settings), { path: { id: requested } }, cfg.historyTimeoutMs),
             ]);
             const valid = (result, id) => result && !result.error && result.data?.id === id &&
               typeof result.data.directory === "string" && typeof result.data.projectID === "string";
@@ -75,7 +80,13 @@ export const CostGuard = async ({ client, directory }, options) => {
             await controller.ingestSession(targetMetadata);
             await controller.recoverAncestry(requested);
           }
-          const result = await extend(context.sessionID, args?.usd, args?.tokens, args?.scope || "session", requested);
+          const question = await controller.requestExtension(context.sessionID, args?.usd, args?.tokens, args?.scope || "session", requested);
+          let result;
+          try { result = await extend(context.sessionID, args?.usd, args?.tokens, args?.scope || "session", requested); }
+          catch (error) {
+            if (!error.message.startsWith("cost-guard: exact budget extension requires")) throw error;
+            return `cost-guard: user approval required; no budget changed. Call the native question tool with ${JSON.stringify(question)}, then retry this extension unchanged. Never answer it yourself.`;
+          }
           return `cost-guard: approved ${args?.scope || "session"} budget extension recorded for ${requested} (${result}).\n${describe(requested)}`;
         },
       },

@@ -1,7 +1,7 @@
 {
   "name": "opencode-cost-guard",
-  "version": "0.7.0",
-  "description": "Cost guard plugin for opencode: warn or hard-stop a session when its LLM spend exceeds a configurable USD limit.",
+  "version": "0.8.0",
+  "description": "OpenCode usage guard with session/run budgets and native user approval for extensions.",
   "type": "module",
   "main": "index.js",
   "types": "index.d.ts",
@@ -11,14 +11,35 @@
       "types": "./index.d.ts"
     }
   },
-  "files": ["index.js", "lib.js", "accounting.js", "index.d.ts", "dist", "README.md", "LICENSE", "test", "benchmark", "scripts/init-budget.mjs"],
+  "files": [
+    "index.js",
+    "lib.js",
+    "accounting.js",
+    "options.js",
+    "approval.js",
+    "index.d.ts",
+    "dist",
+    "README.md",
+    "LICENSE",
+    "test",
+    "benchmark",
+    "scripts/init-budget.mjs"
+  ],
   "scripts": {
-    "test": "node test/smoke.mjs && node test/accounting.mjs && node test/init-budget.mjs",
+    "test": "node test/smoke.mjs && node test/accounting.mjs && node test/init-budget.mjs && node --test test/guard.mjs",
     "init:budget": "node scripts/init-budget.mjs",
     "bench:journal": "node benchmark/journal-replay.mjs",
-    "build:local": "node build-local.mjs"
+    "build:local": "node build-local.mjs",
+    "test:integration": "node test/integration.mjs"
   },
-  "keywords": ["opencode", "opencode-plugin", "cost", "budget", "guard", "llm"],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "cost",
+    "budget",
+    "guard",
+    "llm"
+  ],
   "license": "MIT",
   "peerDependencies": {
     "@opencode-ai/plugin": ">=1"

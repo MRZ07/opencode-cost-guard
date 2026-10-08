@@ -81,7 +81,7 @@ try {
 
   // The initializer preset flows through runtime normalization and enforces each lifetime boundary.
   const config = normalizeOptions({ ...preset, limit: Number.MAX_SAFE_INTEGER, persist: false });
-  const client = { app: { log: async () => {} }, session: { get: async ({ path: { id } }) => ({ data: {
+  const client = { app: { log: async () => {} }, session: { messages: async () => ({ data: [] }), get: async ({ path: { id } }) => ({ data: {
     id, directory: process.cwd(), projectID: "preset-project", parentID: id === "root" ? null : "root",
   } }) } };
   const guard = createCostGuardController(config, client, process.cwd());

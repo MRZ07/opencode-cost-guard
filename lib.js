@@ -1,3 +1,5 @@
+import { validateOptions } from "./options.js";
+import { createApprovalGate } from "./approval.js";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { aggregate, canonicalRoot, createStore, descendants, newLedger, recordMessage, recordSession, tombstoneSession, addApproval, addConfig, mergeRecord, mergeLedger, deltaLedger, hasChanges, projectKey, effectiveBudgetLimits, formatSubagentCheckpoint, appendSubagentCheckpoints, globMatch } from "./accounting.js";
@@ -6,7 +8,7 @@ export { globMatch } from "./accounting.js";
 /**
  * opencode-cost-guard
  *
- * Warn or hard-stop an opencode session when its accumulated LLM spend
+ * Warn or block normal tools in an opencode session when its accumulated LLM spend
  * exceeds a configurable USD limit. Flexible by design: per-agent scoping,
  * warn vs block, and a configurable block behaviour.
  *
@@ -75,6 +77,19 @@ export function resolveLimit(cfg, agent) {
   }
   return cfg.limit;
 }
+/** Bound SDK waits even when an adapter ignores AbortSignal. */
+export async function guardRequest(method, args, timeoutMs) {
+  const controller = new AbortController();
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => method({ ...args, signal: controller.signal }, { signal: controller.signal })),
+      new Promise((_, reject) => { timer = setTimeout(() => {
+        controller.abort(); reject(new Error("host request timed out"));
+      }, timeoutMs); }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
 const projectKeyForDirectory = (directory) => projectKey(directory);
 
 /**
@@ -121,36 +136,15 @@ export function explainCost(s) {
 export function normalizeOptions(options = {}) {
   const envLimit = process.env.OPENCODE_COST_GUARD_LIMIT;
   const envAction = process.env.OPENCODE_COST_GUARD_ACTION;
-
-  const spec = envLimit != null ? Number(envLimit) : (options.limits ?? options.limit);
-  const parsed = parseLimits(spec, 5);
-  const action = String(envAction ?? options.action ?? "warn").toLowerCase();
-
-  const cfg = {
-    limit: parsed.default,
-    limits: parsed.perAgent,
-    action: action === "block" ? "block" : "warn",
-    warnRatio:
-      typeof options.warnRatio === "number" && options.warnRatio > 0 && options.warnRatio <= 1
-        ? options.warnRatio
-        : 0.8,
-    agents: Array.isArray(options.agents) && options.agents.length ? options.agents.map(String) : ["*"],
-    exclude: Array.isArray(options.exclude) ? options.exclude.map(String) : [],
-    maxOutputTokensOnBlock:
-      typeof options.maxOutputTokensOnBlock === "number" && options.maxOutputTokensOnBlock >= 1
-        ? options.maxOutputTokensOnBlock
-        : 1,
-    onBlock: options.onBlock === "ask" ? "ask" : "stop",
-    notify: options.notify !== false,
-    tokenLimit: Number.isSafeInteger(options.tokenLimit) && options.tokenLimit > 0 ? options.tokenLimit : null,
-    subagentTokenLimit: Number.isSafeInteger(options.subagentTokenLimit) && options.subagentTokenLimit > 0 ? options.subagentTokenLimit : null,
-    runLimit: Number.isFinite(options.runLimit) && options.runLimit > 0 ? options.runLimit : null,
-    runTokenLimit: Number.isSafeInteger(options.runTokenLimit) && options.runTokenLimit > 0 ? options.runTokenLimit : null,
-    usdEnabled: options.usdEnabled !== false,
-    persist: options.persist !== false,
-    stateDirectory: typeof options.stateDirectory === "string" ? options.stateDirectory : null,
-  };
-  return cfg;
+  const effective = validateOptions({ ...options,
+    ...(envLimit != null ? { limit: Number(envLimit), limits: undefined } : {}),
+    ...(envAction != null ? { action: envAction.toLowerCase() } : {}),
+  });
+  const parsed = parseLimits(effective.limits ?? effective.limit, 5);
+  return { ...effective, limit: parsed.default, limits: parsed.perAgent,
+    tokenLimit: effective.tokenLimit ?? null, subagentTokenLimit: effective.subagentTokenLimit ?? null,
+    runLimit: effective.runLimit ?? null, runTokenLimit: effective.runTokenLimit ?? null,
+    stateDirectory: effective.stateDirectory ?? null };
 }
 
 /**
@@ -162,6 +156,8 @@ export function createCostGuardController(cfg, client, projectDirectory, project
   /** @type {Map<string, {messages: Map<string, number>, cost: number, agent?: string, model?: string, warned: boolean, blocked: boolean}>} */
   const sessions = new Map();
   let ledger = newLedger();
+  const approvalGate = createApprovalGate();
+  const historyCoverage = new Map();
   let storePromise = cfg.persist ? createStore({ directory: cfg.stateDirectory, filename: "cost-guard.json", projectDirectory }) : Promise.resolve(null);
   let writeQueue = Promise.resolve();
   let writerSeq = 0;
@@ -173,7 +169,7 @@ export function createCostGuardController(cfg, client, projectDirectory, project
   let recoveredSessions = new Map();
   const verifiedMetadataRequests = new Map();
   const enqueue = (mutation) => {
-    writeQueue = writeQueue.then(async () => {
+    writeQueue = writeQueue.catch(() => {}).then(async () => {
       await ready;
       const store = await storePromise;
       if (store) {
@@ -198,7 +194,7 @@ export function createCostGuardController(cfg, client, projectDirectory, project
     const pending = (async () => {
       if (typeof client?.session?.get !== "function") return false;
       try {
-        const response = await client.session.get({ path: { id: sessionID } });
+        const response = await guardRequest(client.session.get.bind(client.session), { path: { id: sessionID } }, cfg.historyTimeoutMs);
         const info = response?.data;
         if (!info || response.error || info.id !== sessionID || typeof info.directory !== "string" ||
           await projectKeyForDirectory(info.directory) !== projectKey || typeof info.projectID !== "string") return false;
@@ -239,25 +235,48 @@ export function createCostGuardController(cfg, client, projectDirectory, project
     if (recoveredSessions.has(sessionID)) return recoveredSessions.get(sessionID);
     const recovery = (async () => {
       await ready;
-      if (typeof client?.session?.messages !== "function") return;
+      let before;
+      const seen = new Set();
       try {
-        const response = await client.session.messages({ path: { id: sessionID }, query: { limit: 500 } });
-        const entries = response?.data ?? response;
-        if (!Array.isArray(entries) || entries.length >= 500) return;
-        const recovered = newLedger();
-        for (const entry of entries) {
-          const info = entry?.info;
-          if (info?.role === "assistant") recordMessage(recovered, { ...info, sessionID: info.sessionID || sessionID }, { recovered: true, writerID: projectContext.instanceID || `${process.pid}` });
+        if (typeof client?.session?.messages !== "function") throw new Error("session.messages API unavailable");
+        for (let page = 0; page < cfg.historyMaxPages; page++) {
+          const response = await guardRequest(client.session.messages.bind(client.session), { path: { id: sessionID },
+            query: { limit: cfg.historyPageSize, ...(before ? { before } : {}) } }, cfg.historyTimeoutMs);
+          if (response?.error) throw new Error("session.messages API failed");
+          const entries = response?.data ?? response;
+          if (!Array.isArray(entries)) throw new Error("invalid message page");
+          const recovered = newLedger();
+          for (const entry of entries) {
+            const info = entry?.info;
+            if (!info?.id || info.sessionID !== sessionID) throw new Error("invalid or cross-session message page");
+            if (info.role === "assistant") recordMessage(recovered, info,
+              { recovered: true, writerID: projectContext.instanceID || `${process.pid}` });
+          }
+          if (hasChanges(recovered)) await enqueue((current) => mergeLedger(current, recovered));
+          const headers = response?.response?.headers ?? response?.headers;
+          const cursor = headers?.get?.("x-next-cursor") ?? headers?.["x-next-cursor"];
+          if (!cursor && (entries.length < cfg.historyPageSize || (headers && entries.length === cfg.historyPageSize))) {
+            historyCoverage.set(sessionID, { complete: true });
+            return;
+          }
+          // A full page without a cursor cannot prove complete recovery on older hosts.
+          if (!cursor || seen.has(cursor)) throw new Error("missing or repeated history cursor");
+          seen.add(cursor);
+          before = cursor;
         }
-        await enqueue((current) => mergeLedger(current, recovered));
-      } catch { /* history is optional; missing coverage must not be described as complete */ }
+        throw new Error("history page bound reached");
+      } catch (error) {
+        historyCoverage.set(sessionID, { complete: false, reason: error.message });
+        await log("warn", `history coverage incomplete: ${error.message}`, { sessionID });
+      }
     })();
     recoveredSessions.set(sessionID, recovery);
-    return recovery;
+    await recovery;
+    if (!historyCoverage.get(sessionID)?.complete) recoveredSessions.delete(sessionID);
   };
   const refresh = async () => {
     await ready;
-    writeQueue = writeQueue.then(async () => {
+    writeQueue = writeQueue.catch(() => {}).then(async () => {
       const store = await storePromise;
       if (store) ledger = await store.replaceFromDisk();
     });
@@ -289,18 +308,20 @@ export function createCostGuardController(cfg, client, projectDirectory, project
   const verifiedTaskNotice = async (callerSessionID, limit = 8) =>
     appendSubagentCheckpoints("", await verifiedTaskEntries(callerSessionID), { limit });
   let generation = 0;
+  let lastConfigPublication = 0;
   const budgetSnapshot = () => ({ schema: "opencode-cost-guard-budget-v1", version: 1, projectKey: null, sessionLimit: cfg.limit,
     limits: cfg.limits, agents: cfg.agents, exclude: cfg.exclude, tokenLimit: cfg.tokenLimit, subagentTokenLimit: cfg.subagentTokenLimit, runLimit: cfg.runLimit, runTokenLimit: cfg.runTokenLimit,
     usdEnabled: cfg.usdEnabled });
   const publishConfig = async () => {
-    if (!cfg.persist) return;
+    if (!cfg.persist || Date.now() - lastConfigPublication < cfg.configRefreshMs) return;
     const instanceID = projectContext.instanceID || `${os.hostname()}:${process.pid}`;
     const config = budgetSnapshot();
     const fingerprint = JSON.stringify({ ...config, approvals: undefined });
     const eventID = randomUUID();
-    const leaseEvent = { eventID, projectKey: projectContext.projectKey, instanceID, pid: process.pid, hostname: os.hostname(),
+    const leaseEvent = { eventID, projectKey, instanceID, pid: process.pid, hostname: os.hostname(),
       generation: ++generation, fingerprint, config, publishedAt: Date.now() };
     await enqueue((current) => addConfig(current, leaseEvent));
+    lastConfigPublication = Date.now();
   };
   const setBudget = async (budget) => enqueue((current) => { current.budget = { ...budget, approvals: current.approvals }; });
   const sessionTotals = (id) => aggregate(ledger, [id]);
@@ -346,12 +367,6 @@ export function createCostGuardController(cfg, client, projectDirectory, project
       cacheRead: totals.cacheRead, cacheWrite: totals.cacheWrite };
     session.turnCount = totals.turns;
     session.models = totals.models;
-    session.messages.clear();
-    for (const record of Object.values(ledger.messages)) if (record.sessionID === id) {
-      session.messages.set(record.id, { cost: record.usage.cost, tokens: { input: record.usage.tokens.input,
-        output: record.usage.tokens.output, reasoning: record.usage.tokens.reasoning,
-        cache: { read: record.usage.tokens.cacheRead, write: record.usage.tokens.cacheWrite } }, model: record.model });
-    }
     return session;
   };
 
@@ -404,12 +419,13 @@ export function createCostGuardController(cfg, client, projectDirectory, project
       );
     }
     if (usageOver || runOver) return true;
+    if (cfg.incompleteHistory === "block" && historyCoverage.get(sessionID)?.complete !== true) return true;
     if (s.blocked) s.blocked = false;
     return false;
   };
 
-  /** Raise a session's limit and clear the blocked/warned flags. */
-  const extend = async (callerSessionID, usd, tokens, scope = "session", targetSessionID = callerSessionID) => {
+  /** Validate and bind an extension before asking the user. */
+  const planExtension = async (callerSessionID, usd, tokens, scope = "session", targetSessionID = callerSessionID) => {
     await recoverAncestry(callerSessionID);
     if (targetSessionID !== callerSessionID) await recoverAncestry(targetSessionID);
     await refresh();
@@ -420,7 +436,14 @@ export function createCostGuardController(cfg, client, projectDirectory, project
       targetAncestry.projectKey !== callerAncestry.projectKey || targetAncestry.projectKey !== projectKey))
       throw new Error("cost-guard: target session is not a verified descendant in the caller's project");
     if (scope === "run" && !targetAncestry.complete) throw new Error("cost-guard: run extension requires verified root ancestry");
+    if (!callerAncestry.complete || !callerAncestry.isRoot || callerAncestry.projectKey !== projectKey)
+      throw new Error("cost-guard: only the verified parent root may approve a budget extension; return this blocker to the parent");
+    if (!["session", "run"].includes(scope)) throw new Error("cost-guard: invalid budget scope");
     if (targetSessionID !== callerSessionID && scope === "run") throw new Error("cost-guard: cross-session run extensions are not allowed");
+    await ensureRecovered(callerSessionID);
+    if (targetSessionID !== callerSessionID) await ensureRecovered(targetSessionID);
+    if (cfg.incompleteHistory === "block" && [callerSessionID, targetSessionID].some((id) => historyCoverage.get(id)?.complete !== true))
+      throw new Error("cost-guard: history coverage incomplete; repair history access before requesting a budget extension");
     const s = refreshSession(targetSessionID);
     const root = scope === "run" ? targetAncestry.id : targetSessionID;
     const dimensions = [];
@@ -445,6 +468,19 @@ export function createCostGuardController(cfg, client, projectDirectory, project
         else throw new Error("cost-guard: no active budget dimension to extend");
       }
     }
+    return { callerSessionID, targetSessionID, scope,
+      usd: dimensions.find((item) => item.usd != null)?.usd ?? null,
+      tokens: dimensions.find((item) => item.tokens != null)?.tokens ?? null };
+  };
+  const requestExtension = async (...args) => approvalGate.prepare(await planExtension(...args));
+  const extend = async (...args) => {
+    const plan = await planExtension(...args);
+    approvalGate.consume(plan);
+    const { callerSessionID, targetSessionID, usd, tokens, scope } = plan;
+    const targetAncestry = canonicalRoot(ledger, targetSessionID, projectKey);
+    const s = refreshSession(targetSessionID);
+    const root = scope === "run" ? targetAncestry.id : targetSessionID;
+    const dimensions = [...(usd == null ? [] : [{ usd }]), ...(tokens == null ? [] : [{ tokens }])];
     const approval = { id: `${process.pid}:${Date.now()}:${Math.random()}`, scope, sessionID: root, dimensions, createdAt: Date.now() };
     await enqueue((current, eventID) => addApproval(current, { ...approval, id: eventID, eventID }));
     s.blocked = false;
@@ -454,7 +490,7 @@ export function createCostGuardController(cfg, client, projectDirectory, project
       sessionID: targetSessionID, rootID: root, approvals: ledger.approvals, ancestry: targetAncestry }).effectiveSessionTokenLimit;
   };
 
-  const isAskTool = (tool) => tool === "question" || String(tool).includes("cost_guard");
+  const isAskTool = (tool) => tool === "question" || tool === "cost_guard_extend";
 
   /** One-line why for a session (used by the extend tool). */
   const describe = (sessionID) => explainCost(get(sessionID));
@@ -462,6 +498,7 @@ export function createCostGuardController(cfg, client, projectDirectory, project
     const hooks = {
     event: async ({ event }) => {
       await ready;
+      approvalGate.event(event);
       if (event.type === "message.updated") {
         const info = event.properties.info;
         if (info.role === "assistant") {
@@ -473,12 +510,16 @@ export function createCostGuardController(cfg, client, projectDirectory, project
         }
       } else if (event.type === "session.created" || event.type === "session.updated") {
         const info = event.properties.info;
+        verifiedMetadataRequests.delete(info.id);
         if (typeof info.title === "string") transientTitles.set(info.id, info.title.slice(0, 512));
         let verified = false;
         try { verified = typeof info.directory === "string" && await projectKeyForDirectory(info.directory) === projectKey; }
         catch { verified = false; }
         await enqueue((current, eventID) => { recordSession(current, info, { eventID, writerID: projectContext.instanceID || `${process.pid}`, writerSeq: ++writerSeq,
           metadataVerified: verified, projectKey: verified ? projectKey : null }); });
+      } else if (event.type === "session.idle") {
+        await refresh();
+        await publishConfig();
       } else if (event.type === "session.deleted") {
         await enqueue((current, eventID) => { tombstoneSession(current, event.properties.info.id, { eventID, writerID: projectContext.instanceID || `${process.pid}` }); });
       }
@@ -490,6 +531,8 @@ export function createCostGuardController(cfg, client, projectDirectory, project
     },
 
     "chat.params": async (input, output) => {
+      await ensureRecovered(input.sessionID);
+      await recoverAncestry(input.sessionID);
       await refresh();
       const s = refreshSession(input.sessionID);
       if (input.agent) s.agent = input.agent;
@@ -509,6 +552,7 @@ export function createCostGuardController(cfg, client, projectDirectory, project
     },
 
     "tool.execute.before": async (input) => {
+      await ensureRecovered(input.sessionID);
       await recoverAncestry(input.sessionID);
       await refresh();
       const s = refreshSession(input.sessionID);
@@ -519,6 +563,10 @@ export function createCostGuardController(cfg, client, projectDirectory, project
       { agent: s.agent || "?", sessionID: input.sessionID, rootID: ancestry.id, approvals: ledger.approvals, ancestry });
       const over = await overLimit(input.sessionID);
       if (!over || cfg.action !== "block") return;
+      if (cfg.onBlock === "ask" && isAskTool(input.tool)) return;
+      const coverage = historyCoverage.get(input.sessionID);
+      if (cfg.incompleteHistory === "block" && coverage?.complete !== true)
+        throw new Error(`cost-guard: history coverage incomplete (${coverage?.reason || "not recovered"}). Repair host/history access or recovery bounds, then retry. Budget extensions do not repair coverage; subagents must return this blocker to their parent.`);
 
       if (cfg.onBlock === "ask") {
         if (isAskTool(input.tool)) return; // let the agent ask and extend
@@ -537,7 +585,7 @@ export function createCostGuardController(cfg, client, projectDirectory, project
           ? `${formatSubagentCheckpoint({ id: input.sessionID, title, totalTokens: totals.totalTokens, input: totals.input, output: totals.output,
             reasoning: totals.reasoning, limit: effective.subagentEffectiveLimit, approvalTokens: effective.subagentBaseLimit })} Parent root ${ancestry.id} is the authority for this decision. `
           : "Ask the user whether to continue and how much extra USD or tokens to grant, then call cost_guard_extend and resume; otherwise stop. The existing question tool remains available when permitted. ";
-        throw new Error(`cost-guard: active budget exceeded. ${checkpoint}input ${totals.input} + output ${totals.output} + reasoning ${totals.reasoning} = ${totals.totalTokens} budget tokens (cache excluded). ${explainCost(s)}`);
+        throw new Error(`cost-guard: active budget exceeded or history coverage incomplete (${historyCoverage.get(input.sessionID)?.reason || "coverage available"}). ${checkpoint}input ${totals.input} + output ${totals.output} + reasoning ${totals.reasoning} = ${totals.totalTokens} budget tokens (cache excluded). ${explainCost(s)}`);
       }
 
       if (!s.blocked) {
@@ -556,7 +604,9 @@ export function createCostGuardController(cfg, client, projectDirectory, project
           explainCost(s),
       );
     },
-    "tool.execute.after": async ({ tool, sessionID }, output) => {
+    "tool.execute.after": async (input, output) => {
+      const { tool, sessionID } = input;
+      if (tool === "question") approvalGate.afterQuestion(input, output);
       if (tool !== "task" || !output || typeof output !== "object") return;
       const entries = await verifiedTaskEntries(sessionID);
       if (!entries.length) return;
@@ -565,7 +615,7 @@ export function createCostGuardController(cfg, client, projectDirectory, project
     "session.idle": async () => { await refresh(); await publishConfig(); },
   };
 
-  return { hooks, extend, describe, ready, refresh, publishConfig, verifiedTaskNotice, verifiedTaskEntries, recoverAncestry,
+  return { hooks, extend, requestExtension, describe, ready, refresh, publishConfig, verifiedTaskNotice, verifiedTaskEntries, recoverAncestry,
     ingestSession: async (info) => {
       if (typeof info?.title === "string") transientTitles.set(info.id, info.title.slice(0, 512));
       if (Object.hasOwn(info || {}, "parentID")) metadataParents.set(info.id, info.parentID);

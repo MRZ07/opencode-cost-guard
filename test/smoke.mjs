@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import {
   createCostGuard,
-  createCostGuardController,
+  createCostGuardController as rawCreateCostGuardController,
   explainCost,
   fmtNum,
   normalizeOptions as rawNormalizeOptions,
@@ -10,10 +10,27 @@ import {
 import { projectKey } from "../accounting.js";
 import { CostGuard } from "../index.js";
 
-const normalizeOptions = (options = {}) => rawNormalizeOptions({ ...options, persist: false });
+const normalizeOptions = (options = {}) => rawNormalizeOptions({ incompleteHistory: "warn", ...options, persist: false });
+
+// Legacy accounting scenarios grant approval through the same native question events.
+function createCostGuardController(...args) {
+  const controller = rawCreateCostGuardController(...args);
+  return { ...controller, extend: async (...extension) => {
+    const question = await controller.requestExtension(...extension);
+    const requestID = `test-${Math.random()}`;
+    await controller.hooks.event({ event: { type: "question.asked", properties: {
+      id: requestID, sessionID: extension[0], ...question,
+    } } });
+    await controller.hooks.event({ event: { type: "question.replied", properties: {
+      requestID, sessionID: extension[0], answers: [["Approve"]],
+    } } });
+    return controller.extend(...extension);
+  } };
+}
 
 const logs = [];
 const client = {
+  session: { messages: async () => ({ data: [] }), get: async ({ path: { id } }) => ({ data: { id, directory: process.cwd(), projectID: "project", parentID: null } }) },
   app: {
     log: async ({ body }) => {
       logs.push(body);
@@ -44,7 +61,7 @@ function assistantEvent(sessionID, id, cost, extra = {}) {
 
 // Native tool.execute.after output is output.output (a string), and checkpoint markers dedupe across plugin-order repeats.
 {
-  const hooks = await CostGuard({ client: { ...client, session: { get: async ({ path: { id } }) => ({ data: {
+  const hooks = await CostGuard({ client: { ...client, session: { messages: async () => ({ data: [] }), get: async ({ path: { id } }) => ({ data: {
     id, directory: process.cwd(), projectID: "project", ...(id === "native-root" ? { parentID: null } : { parentID: "native-root" }),
   } }) } }, directory: { worktree: process.cwd() } }, { persist: false, subagentTokenLimit: 10, action: "block", onBlock: "ask" });
   await hooks.event({ event: { type: "session.created", properties: { info: { id: "native-root", parentID: null, directory: process.cwd(), projectID: "project" } } } });
@@ -67,7 +84,7 @@ function assistantEvent(sessionID, id, cost, extra = {}) {
     await hooks.event(assistantEvent(id, "under-cap", 0, { tokens: { input: index === 9 ? 10 : 0, output: 0, reasoning: 0 } }));
   }
   const boundedController = createCostGuardController(normalizeOptions({ persist: false, subagentTokenLimit: 10, action: "block", onBlock: "ask" }), {
-    ...client, session: { get: async ({ path: { id } }) => ({ data: { id, directory: process.cwd(), projectID: "project",
+    ...client, session: { messages: async () => ({ data: [] }), get: async ({ path: { id } }) => ({ data: { id, directory: process.cwd(), projectID: "project",
       ...(id === "native-root" ? { parentID: null } : { parentID: "native-root" }) } }) },
   }, process.cwd());
   await boundedController.hooks.event({ event: { type: "session.created", properties: { info: { id: "native-root", parentID: null, directory: process.cwd() } } } });
@@ -115,7 +132,7 @@ function assistantEvent(sessionID, id, cost, extra = {}) {
   await assert.rejects(() => recovered["tool.execute.before"]({ tool: "bash", sessionID: "resumed-child" }), /active budget/);
   assert.ok(calls.includes("resumed-child") && calls.includes("resumed-root"), "SDK recovery validated each ancestry link");
   const controller = createCostGuardController(normalizeOptions({ persist: false, subagentTokenLimit: 250000, action: "block", onBlock: "ask" }), {
-    ...client, session: { get: async ({ path: { id } }) => ({ data: { ...metadata[id], projectID: "project" } }) },
+    ...client, session: { messages: async () => ({ data: [] }), get: async ({ path: { id } }) => ({ data: { ...metadata[id], projectID: "project" } }) },
   }, process.cwd());
   assert.equal(await controller.extend("resumed-root", undefined, 250000, "session", "resumed-child"), 500000,
     "parent extension independently recovers and validates child ancestry");
@@ -127,30 +144,30 @@ function assistantEvent(sessionID, id, cost, extra = {}) {
     root: { id: "extend-root", parentID: null, directory: process.cwd(), projectID: "project" },
     child: { id: "extend-child", parentID: "extend-root", directory: process.cwd(), projectID: "project" },
   };
-  const sdk = { ...client, session: { get: async ({ path: { id } }) => ({ data: metadata[id === "extend-root" ? "root" : "child"] }) } };
+  const sdk = { ...client, session: { messages: async () => ({ data: [] }), get: async ({ path: { id } }) => ({ data: metadata[id === "extend-root" ? "root" : "child"] }) } };
   const usdGuard = createCostGuardController(normalizeOptions({ persist: false, limit: 5, subagentTokenLimit: 250000, onBlock: "ask" }), sdk, process.cwd());
   assert.equal(await usdGuard.extend("extend-root", undefined, undefined, "session", "extend-child"), 250000);
   assert.deepEqual(usdGuard._ledger().approvals.at(-1).dimensions, [{ usd: 5 }]);
   const tokenGuard = createCostGuardController(normalizeOptions({ persist: false, usdEnabled: false, tokenLimit: 100000, subagentTokenLimit: 250000, onBlock: "ask" }), sdk, process.cwd());
   assert.equal(await tokenGuard.extend("extend-root", undefined, undefined, "session", "extend-child"), 200000);
   assert.deepEqual(tokenGuard._ledger().approvals.at(-1).dimensions, [{ tokens: 100000 }]);
-  const wrongProjectSDK = { ...client, session: { get: async ({ path: { id } }) => ({
+  const wrongProjectSDK = { ...client, session: { messages: async () => ({ data: [] }), get: async ({ path: { id } }) => ({
     data: { ...metadata[id === "extend-root" ? "root" : "child"], projectID: "project", parentID: id === "extend-root" ? null : "unverified-parent" },
   }) } };
   const wrongProject = createCostGuardController(normalizeOptions({ persist: false, subagentTokenLimit: 250000 }), wrongProjectSDK, process.cwd());
   await assert.rejects(() => wrongProject.extend("extend-root", undefined, 250000, "session", "extend-child"), /verified descendant/);
   assert.equal(wrongProject._ledger().approvals.length, 0, "cross-project project IDs are rejected without ingestion");
   const failedMetadata = createCostGuardController(normalizeOptions({ persist: false, subagentTokenLimit: 250000 }), {
-    ...client, session: { get: async ({ path: { id } }) => id === "extend-root" ? { error: new Error("unavailable") } : ({ data: metadata.child }) },
+    ...client, session: { messages: async () => ({ data: [] }), get: async ({ path: { id } }) => id === "extend-root" ? { error: new Error("unavailable") } : ({ data: metadata.child }) },
   }, process.cwd());
   await assert.rejects(() => failedMetadata.extend("extend-root", undefined, 250000, "session", "extend-child"), /verified descendant/);
-  const cycleSDK = { ...client, session: { get: async ({ path: { id } }) => ({ data: {
+  const cycleSDK = { ...client, session: { messages: async () => ({ data: [] }), get: async ({ path: { id } }) => ({ data: {
     id, directory: process.cwd(), projectID: "project", parentID: id === "extend-root" ? "extend-child" : "extend-root",
   } }) } };
   const cycle = createCostGuardController(normalizeOptions({ persist: false, subagentTokenLimit: 250000 }), cycleSDK, process.cwd());
   await assert.rejects(() => cycle.extend("extend-root", undefined, 250000, "session", "extend-child"), /verified descendant/);
   const missingParent = createCostGuardController(normalizeOptions({ persist: false, subagentTokenLimit: 250000 }), {
-    ...client, session: { get: async ({ path: { id } }) => ({ data: id === "extend-root"
+    ...client, session: { messages: async () => ({ data: [] }), get: async ({ path: { id } }) => ({ data: id === "extend-root"
       ? { ...metadata.root, projectID: "project" } : { id, directory: process.cwd(), projectID: "project" } }) },
   }, process.cwd());
   await assert.rejects(() => missingParent.extend("extend-root", undefined, 250000, "session", "extend-child"), /verified descendant/);
@@ -173,7 +190,7 @@ function assistantEvent(sessionID, id, cost, extra = {}) {
   assert.equal(cfg.subagentTokenLimit, 250000);
   const key = await projectKey(process.cwd());
   const { hooks, extend, verifiedTaskNotice } = createCostGuardController(cfg, { ...client,
-    session: { get: async ({ path: { id } }) => ({ data: { id, directory: process.cwd(), projectID: "project" } }) },
+    session: { messages: async () => ({ data: [] }), get: async ({ path: { id } }) => ({ data: { id, directory: process.cwd(), projectID: "project" } }) },
   }, process.cwd(), { projectKey: key, instanceID: "checkpoint-smoke" });
   await hooks.event({ event: { type: "session.created", properties: { info: { id: "root", parentID: null, directory: process.cwd() } } } });
   await hooks.event({ event: { type: "session.created", properties: { info: { id: "child", parentID: "root", directory: process.cwd() } } } });

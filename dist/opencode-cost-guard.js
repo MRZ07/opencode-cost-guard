@@ -12,6 +12,24 @@ function jsonStringifyReplacer(_, value) {
     return value.toString();
   return value;
 }
+
+class Cached {
+  constructor(getter) {
+    this._getter = getter;
+    this._value = undefined;
+  }
+  get value() {
+    const getter = this._getter;
+    if (getter !== undefined) {
+      this._value = getter();
+      this._getter = undefined;
+    }
+    return this._value;
+  }
+}
+function cached(getter) {
+  return new Cached(getter);
+}
 function nullish(input) {
   return input === null || input === undefined;
 }
@@ -40,6 +58,52 @@ function rawShape(def) {
   const desc = Object.getOwnPropertyDescriptor(def, "shape");
   return desc?.get ? desc.get.raw : desc?.value;
 }
+function sourceShape(schema) {
+  return rawShape(schema._zod.def) ?? schema._zod.def.shape;
+}
+function deferProp(target, key, getter) {
+  Object.defineProperty(target, key, {
+    get() {
+      const value = getter();
+      assignProp(this, key, value);
+      return value;
+    },
+    enumerable: true,
+    configurable: true
+  });
+}
+function putProp(target, key, value) {
+  if (key in target)
+    assignProp(target, key, value);
+  else
+    target[key] = value;
+}
+function mirrorShape(target, source, keys, wrap) {
+  const raw = sourceShape(source);
+  for (const key of keys) {
+    const desc = Object.getOwnPropertyDescriptor(raw, key);
+    if (!desc.enumerable)
+      continue;
+    if (desc.get) {
+      deferProp(target, key, () => {
+        const value = source._zod.def.shape[key];
+        return wrap ? wrap(value, key) : value;
+      });
+    } else
+      putProp(target, key, wrap ? wrap(desc.value, key) : desc.value);
+  }
+}
+function mirrorProps(target, source) {
+  for (const key of Reflect.ownKeys(source)) {
+    const desc = Object.getOwnPropertyDescriptor(source, key);
+    if (!desc.enumerable)
+      continue;
+    if (desc.get)
+      deferProp(target, key, () => source[key]);
+    else
+      putProp(target, key, desc.value);
+  }
+}
 function mergeDefs(...defs) {
   const mergedDescriptors = {};
   for (const def of defs) {
@@ -48,6 +112,9 @@ function mergeDefs(...defs) {
   }
   return Object.defineProperties({}, mergedDescriptors);
 }
+function esc(str) {
+  return JSON.stringify(str);
+}
 function slugify(input) {
   return input.toLowerCase().trim().replace(/[^\w\s-]/g, "").replace(/[\s_-]+/g, "-").replace(/^-+|-+$/g, "");
 }
@@ -55,6 +122,21 @@ var captureStackTrace = "captureStackTrace" in Error ? Error.captureStackTrace :
 function isObject(data) {
   return typeof data === "object" && data !== null && !Array.isArray(data);
 }
+var allowsEval = /* @__PURE__ */ cached(() => {
+  if (globalConfig.jitless) {
+    return false;
+  }
+  if (typeof navigator !== "undefined" && navigator?.userAgent?.includes("Cloudflare")) {
+    return false;
+  }
+  try {
+    const F = Function;
+    new F("");
+    return true;
+  } catch (_) {
+    return false;
+  }
+});
 function isPlainObject(o) {
   if (isObject(o) === false)
     return false;
@@ -115,6 +197,11 @@ function stringifyPrimitive(value) {
     return `"${value}"`;
   return `${value}`;
 }
+function optionalKeys(shape) {
+  return Object.keys(shape).filter((k) => {
+    return shape[k]._zod.optin !== undefined && shape[k]._zod.optout === "optional";
+  });
+}
 var NUMBER_FORMAT_RANGES = /* @__PURE__ */ (() => ({
   safeint: [Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
   int32: [-2147483648, 2147483647],
@@ -126,6 +213,106 @@ var BIGINT_FORMAT_RANGES = {
   int64: [/* @__PURE__ */ BigInt("-9223372036854775808"), /* @__PURE__ */ BigInt("9223372036854775807")],
   uint64: [/* @__PURE__ */ BigInt(0), /* @__PURE__ */ BigInt("18446744073709551615")]
 };
+function pick(schema, mask) {
+  const currDef = schema._zod.def;
+  const checks = currDef.checks;
+  const hasChecks = checks && checks.length > 0;
+  if (hasChecks) {
+    throw new Error(".pick() cannot be used on object schemas containing refinements");
+  }
+  const newShape = {};
+  mirrorShape(newShape, schema, maskedKeys(schema, mask));
+  return clone(schema, mergeDefs(currDef, { shape: newShape, checks: [] }));
+}
+function maskedKeys(schema, mask) {
+  const raw = sourceShape(schema);
+  const keys = [];
+  for (const key of Reflect.ownKeys(mask)) {
+    if (!Object.getOwnPropertyDescriptor(raw, key)?.enumerable) {
+      throw new Error(`Unrecognized key: "${String(key)}"`);
+    }
+    if (mask[key])
+      keys.push(key);
+  }
+  return keys;
+}
+function omit(schema, mask) {
+  const currDef = schema._zod.def;
+  const checks = currDef.checks;
+  const hasChecks = checks && checks.length > 0;
+  if (hasChecks) {
+    throw new Error(".omit() cannot be used on object schemas containing refinements");
+  }
+  const omitted = new Set(maskedKeys(schema, mask));
+  const newShape = {};
+  mirrorShape(newShape, schema, Reflect.ownKeys(sourceShape(schema)).filter((key) => !omitted.has(key)));
+  return clone(schema, mergeDefs(currDef, { shape: newShape, checks: [] }));
+}
+function extend(schema, shape) {
+  if (!isPlainObject(shape)) {
+    throw new Error("Invalid input to extend: expected a plain object");
+  }
+  const checks = schema._zod.def.checks;
+  const hasChecks = checks && checks.length > 0;
+  if (hasChecks) {
+    const existingShape = sourceShape(schema);
+    for (const key of Reflect.ownKeys(shape)) {
+      if (Object.getOwnPropertyDescriptor(existingShape, key) !== undefined) {
+        throw new Error("Cannot overwrite keys on object schemas containing refinements. Use `.safeExtend()` instead.");
+      }
+    }
+  }
+  return clone(schema, mergeDefs(schema._zod.def, { shape: extended(schema, shape) }));
+}
+function extended(schema, shape) {
+  const newShape = {};
+  mirrorShape(newShape, schema, Reflect.ownKeys(sourceShape(schema)));
+  mirrorProps(newShape, shape);
+  return newShape;
+}
+function safeExtend(schema, shape) {
+  if (!isPlainObject(shape)) {
+    throw new Error("Invalid input to safeExtend: expected a plain object");
+  }
+  return clone(schema, mergeDefs(schema._zod.def, { shape: extended(schema, shape) }));
+}
+function merge(a, b) {
+  if (!b?._zod?.def) {
+    throw new Error("Invalid input to merge: expected an object schema. To merge a plain shape, use `.extend()`.");
+  }
+  if (a._zod.def.checks?.length) {
+    throw new Error(".merge() cannot be used on object schemas containing refinements. Use .safeExtend() instead.");
+  }
+  const newShape = {};
+  mirrorShape(newShape, a, Reflect.ownKeys(sourceShape(a)));
+  mirrorShape(newShape, b, Reflect.ownKeys(sourceShape(b)));
+  const def = mergeDefs(a._zod.def, {
+    shape: newShape,
+    get catchall() {
+      return b._zod.def.catchall;
+    },
+    checks: b._zod.def.checks ?? []
+  });
+  return clone(a, def);
+}
+function partial(Class, schema, mask, name = "partial") {
+  const currDef = schema._zod.def;
+  const checks = currDef.checks;
+  const hasChecks = checks && checks.length > 0;
+  if (hasChecks) {
+    throw new Error(`.${name}() cannot be used on object schemas containing refinements`);
+  }
+  const selected = mask ? new Set(maskedKeys(schema, mask)) : undefined;
+  const newShape = {};
+  mirrorShape(newShape, schema, Reflect.ownKeys(sourceShape(schema)), Class && ((value, key) => selected && !selected.has(key) ? value : new Class({ type: "optional", innerType: value })));
+  return clone(schema, mergeDefs(schema._zod.def, { shape: newShape, checks: [] }));
+}
+function required(Class, schema, mask) {
+  const selected = mask ? new Set(maskedKeys(schema, mask)) : undefined;
+  const newShape = {};
+  mirrorShape(newShape, schema, Reflect.ownKeys(sourceShape(schema)), (value, key) => selected && !selected.has(key) ? value : new Class({ type: "nonoptional", innerType: value }));
+  return clone(schema, mergeDefs(schema._zod.def, { shape: newShape }));
+}
 function aborted(x, startIndex = 0) {
   if (x.aborted === true)
     return true;
@@ -284,6 +471,10 @@ function defineBound(proto, key, fn) {
     }
   });
 }
+function claim(inst, sentinel) {
+  const proto = Object.getPrototypeOf(inst);
+  return sentinel in proto ? undefined : proto;
+}
 var installing;
 var broke = false;
 var breaker = {
@@ -322,6 +513,24 @@ function defineLazyInternal(inst, key, compute) {
     },
     set(value) {
       Object.defineProperty(this, key, { configurable: true, writable: true, value });
+    }
+  });
+}
+function installLazyProp(inst, key, make, enumerable) {
+  const proto = claim(inst, key);
+  if (!proto)
+    return;
+  Object.defineProperty(proto, key, {
+    configurable: true,
+    get() {
+      const desc = { configurable: true, writable: true, enumerable, value: undefined };
+      Object.defineProperty(this, key, desc);
+      desc.value = make(this);
+      Object.defineProperty(this, key, desc);
+      return desc.value;
+    },
+    set(value) {
+      Object.defineProperty(this, key, { configurable: true, writable: true, enumerable, value });
     }
   });
 }
@@ -764,7 +973,9 @@ function datetime(args) {
   return new RegExp(`^${dateSource}T(?:${timeRegex})$`);
 }
 var anyString = /^[\s\S]{0,}$/;
+var integer = /^-?\d+$/;
 var number = /^-?\d+(?:\.\d+)?$/;
+var boolean = /^(?:true|false)$/i;
 var lowercase = /^[^A-Z]*$/;
 var uppercase = /^[^a-z]*$/;
 
@@ -1083,6 +1294,48 @@ var $ZodCheckOverwrite = /* @__PURE__ */ $constructor("$ZodCheckOverwrite", (ins
     payload.value = def.tx(payload.value);
   };
 });
+
+// node_modules/zod/v4/core/doc.js
+class Doc {
+  constructor(args = [], closed = {}) {
+    this.content = [];
+    this.indent = 0;
+    this.args = args;
+    this.closed = closed;
+  }
+  indented(fn) {
+    this.indent += 1;
+    try {
+      fn(this);
+    } finally {
+      this.indent -= 1;
+    }
+  }
+  write(arg) {
+    if (typeof arg === "function") {
+      arg(this, { execution: "sync" });
+      arg(this, { execution: "async" });
+      return;
+    }
+    const content = arg;
+    const lines = content.split(`
+`).filter((x) => x);
+    const minIndent = Math.min(...lines.map((x) => x.length - x.trimStart().length));
+    const dedented = lines.map((x) => x.slice(minIndent)).map((x) => " ".repeat(this.indent * 2) + x);
+    for (const line of dedented) {
+      this.content.push(line);
+    }
+  }
+  compile() {
+    const F = Function;
+    const content = this?.content ?? [``];
+    const factory = new F(...Object.keys(this.closed), `return function (${this.args.join(", ")}) {
+${content.join(`
+`)}
+};`);
+    return factory(...Object.values(this.closed));
+  }
+}
 
 // node_modules/zod/v4/core/versions.js
 var version = {
@@ -1604,6 +1857,42 @@ var $ZodNumberFormat = /* @__PURE__ */ $constructor("$ZodNumberFormat", (inst, d
   $ZodCheckNumberFormat.init(inst, def);
   $ZodNumber.init(inst, def);
 });
+var $ZodBoolean = /* @__PURE__ */ $constructor("$ZodBoolean", (inst, def) => {
+  $ZodType.init(inst, def);
+  inst._zod.pattern = boolean;
+  inst._zod.parse = (payload, _ctx) => {
+    if (def.coerce)
+      try {
+        payload.value = Boolean(payload.value);
+      } catch (_) {}
+    const input = payload.value;
+    if (typeof input === "boolean")
+      return payload;
+    payload.issues.push({
+      expected: "boolean",
+      code: "invalid_type",
+      input,
+      inst
+    });
+    return payload;
+  };
+});
+var $ZodUnknown = /* @__PURE__ */ $constructor("$ZodUnknown", (inst, def) => {
+  $ZodType.init(inst, def);
+  inst._zod.parse = (payload) => payload;
+});
+var $ZodNever = /* @__PURE__ */ $constructor("$ZodNever", (inst, def) => {
+  $ZodType.init(inst, def);
+  inst._zod.parse = (payload, _ctx) => {
+    payload.issues.push({
+      expected: "never",
+      code: "invalid_type",
+      input: payload.value,
+      inst
+    });
+    return payload;
+  };
+});
 function handleArrayResult(result, final, index) {
   if (result.issues.length) {
     final.issues.push(...prefixIssues(index, result.issues));
@@ -1646,6 +1935,310 @@ var $ZodArray = /* @__PURE__ */ $constructor("$ZodArray", (inst, def) => {
       return Promise.all(proms).then(() => payload);
     }
     return payload;
+  };
+});
+function handlePropertyResult(result, final, key, input, optin, optout) {
+  const isPresent = key in input;
+  const isOptionalOut = optout === "optional";
+  if (!isPresent && isOptionalOut && optin === "optional") {
+    return;
+  }
+  if (result.issues.length) {
+    if (optin !== undefined && isOptionalOut && !isPresent) {
+      return;
+    }
+    final.issues.push(...prefixIssues(key, result.issues));
+  }
+  if (!isPresent && optin === undefined) {
+    if (!result.issues.length) {
+      final.issues.push({
+        code: "invalid_type",
+        expected: "nonoptional",
+        input: undefined,
+        path: [key]
+      });
+    }
+    return;
+  }
+  if (result.value === undefined) {
+    if (isPresent || optin === "defaulted" && !isOptionalOut) {
+      final.value[key] = undefined;
+    }
+  } else {
+    final.value[key] = result.value;
+  }
+}
+var NO_SYMBOL_KEYS = [];
+function normalizeDef(def) {
+  const keys = Object.keys(def.shape);
+  const ownSymbols = Object.getOwnPropertySymbols(def.shape);
+  const symbolKeys = ownSymbols.length ? ownSymbols : NO_SYMBOL_KEYS;
+  const allKeys = symbolKeys.length ? [...keys, ...symbolKeys] : keys;
+  for (const k of allKeys) {
+    if (!def.shape?.[k]?._zod?.traits?.has("$ZodType")) {
+      throw new Error(`Invalid element at key "${String(k)}": expected a Zod schema`);
+    }
+  }
+  const okeys = optionalKeys(def.shape);
+  return {
+    ...def,
+    allKeys,
+    symbolKeys,
+    keySet: new Set(keys),
+    numKeys: keys.length,
+    optionalKeys: new Set(okeys)
+  };
+}
+function handleCatchall(proms, input, payload, ctx, def, inst, abortEarly) {
+  const unrecognized = [];
+  const keySet = def.keySet;
+  const _catchall = def.catchall._zod;
+  const t = _catchall.def.type;
+  const optin = _catchall.optin;
+  const optout = _catchall.optout;
+  let seen = 0;
+  for (const key in input) {
+    if (abortEarly && payload.issues.length !== seen) {
+      if (aborted(payload, seen))
+        break;
+      seen = payload.issues.length;
+    }
+    if (keySet.has(key))
+      continue;
+    if (key === "__proto__") {
+      if (t === "never")
+        unrecognized.push(key);
+      continue;
+    }
+    if (t === "never") {
+      unrecognized.push(key);
+      continue;
+    }
+    const r = _catchall.run({ value: input[key], issues: [] }, ctx);
+    if (r instanceof Promise) {
+      proms.push(r.then((r) => handlePropertyResult(r, payload, key, input, optin, optout)));
+    } else {
+      handlePropertyResult(r, payload, key, input, optin, optout);
+    }
+  }
+  if (unrecognized.length) {
+    payload.issues.push({
+      code: "unrecognized_keys",
+      keys: unrecognized,
+      input,
+      inst,
+      continue: true
+    });
+  }
+  if (!proms.length)
+    return payload;
+  return Promise.all(proms).then(() => {
+    return payload;
+  });
+}
+var $ZodObject = /* @__PURE__ */ $constructor("$ZodObject", (inst, def) => {
+  $ZodType.init(inst, def);
+  const desc = Object.getOwnPropertyDescriptor(def, "shape");
+  const sh = desc?.get ? desc.get.raw : def.shape ?? {};
+  if (sh) {
+    const get = () => {
+      const newSh = { ...sh };
+      Object.defineProperty(def, "shape", { value: newSh });
+      get.raw = newSh;
+      return newSh;
+    };
+    get.raw = sh;
+    Object.defineProperty(def, "shape", { get });
+  }
+  const _normalized = cached(() => normalizeDef(def));
+  defineLazyInternal(inst, "propValues", (zod) => {
+    const shape = zod.def.shape;
+    const propValues = {};
+    for (const key in shape) {
+      const field = shape[key]._zod;
+      if (field.values) {
+        if (!Object.prototype.hasOwnProperty.call(propValues, key)) {
+          assignProp(propValues, key, new Set);
+        }
+        for (const v of field.values)
+          propValues[key].add(v);
+        if (field.optin !== undefined)
+          propValues[key].add(undefined);
+      }
+    }
+    return propValues;
+  });
+  const isObject2 = isObject;
+  const catchall = def.catchall;
+  let value;
+  const memo = globalConfig.memoizer;
+  memo?.attach(inst);
+  inst._zod.parse = (payload, ctx) => {
+    value ?? (value = _normalized.value);
+    const input = payload.value;
+    if (!isObject2(input)) {
+      payload.issues.push({
+        expected: "object",
+        code: "invalid_type",
+        input,
+        inst
+      });
+      return payload;
+    }
+    payload.value = memo ? memo.alloc(inst, payload, {}, ctx) : {};
+    const proms = [];
+    const shape = value.shape;
+    const abortEarly = ctx?.abortEarly;
+    let seen = payload.issues.length;
+    for (const key of value.allKeys) {
+      if (abortEarly && payload.issues.length !== seen) {
+        if (aborted(payload, seen))
+          break;
+        seen = payload.issues.length;
+      }
+      if (key === "__proto__")
+        continue;
+      const el = shape[key];
+      const optin = el._zod.optin;
+      const optout = el._zod.optout;
+      const r = el._zod.run({ value: input[key], issues: [] }, ctx);
+      if (r instanceof Promise) {
+        proms.push(r.then((r) => handlePropertyResult(r, payload, key, input, optin, optout)));
+      } else {
+        handlePropertyResult(r, payload, key, input, optin, optout);
+      }
+    }
+    if (!catchall) {
+      return proms.length ? Promise.all(proms).then(() => payload) : payload;
+    }
+    return handleCatchall(proms, input, payload, ctx, _normalized.value, inst, abortEarly === true);
+  };
+});
+var $ZodObjectJIT = /* @__PURE__ */ $constructor("$ZodObjectJIT", (inst, def) => {
+  $ZodObject.init(inst, def);
+  const superParse = inst._zod.parse;
+  const _normalized = cached(() => normalizeDef(def));
+  const memo = globalConfig.memoizer;
+  const generateFastpass = (shape) => {
+    const normalized = _normalized.value;
+    const syms = normalized.symbolKeys;
+    const doc = new Doc(["payload", "ctx"], { shape, inst, memo, syms });
+    const parseStr = (k) => `shape[${k}]._zod.run({ value: input[${k}], issues: [] }, ctx)`;
+    const prefixStr = (id, k) => `
+          let ${id}_ab = false;
+          for (let i = 0; i < ${id}.issues.length; i++) {
+            const iss = ${id}.issues[i];
+            iss.path = iss.path ? [${k}, ...iss.path] : [${k}];
+            payload.issues.push(iss);
+            if (iss.continue !== true) ${id}_ab = true;
+          }
+          if (${id}_ab && ctx && ctx.abortEarly) {
+            payload.value = newResult;
+            return payload;
+          }`;
+    doc.write(`const input = payload.value;`);
+    const ids = Object.create(null);
+    let counter = 0;
+    for (const key of normalized.allKeys) {
+      ids[key] = `key_${counter++}`;
+    }
+    doc.write(memo ? `const newResult = memo.alloc(inst, payload, {}, ctx);` : `const newResult = {};`);
+    for (const key of normalized.allKeys) {
+      if (key === "__proto__")
+        continue;
+      const id = ids[key];
+      const k = typeof key === "symbol" ? `syms[${syms.indexOf(key)}]` : esc(key);
+      const isPresent = `${k} in input`;
+      const schema = shape[key];
+      const optin = schema?._zod?.optin;
+      const isOptionalIn = optin !== undefined;
+      const isOptionalOut = schema?._zod?.optout === "optional";
+      doc.write(`const ${id} = ${parseStr(k)};`);
+      if (isOptionalIn && isOptionalOut) {
+        const assign = optin === "optional" ? `${id}_present` : `${id}.value !== undefined || ${id}_present`;
+        doc.write(`
+        const ${id}_present = ${isPresent};
+        if (!${id}.issues.length || ${id}_present) {
+          if (${id}.issues.length) {${prefixStr(id, k)}
+          }
+
+          if (${assign}) {
+            newResult[${k}] = ${id}.value;
+          }
+        }
+
+      `);
+      } else if (!isOptionalIn) {
+        doc.write(`
+        const ${id}_present = ${isPresent};
+        if (${id}.issues.length) {${prefixStr(id, k)}
+        }
+        if (!${id}_present && !${id}.issues.length) {
+          payload.issues.push({
+            code: "invalid_type",
+            expected: "nonoptional",
+            input: undefined,
+            path: [${k}]
+          });
+          if (ctx && ctx.abortEarly) {
+            payload.value = newResult;
+            return payload;
+          }
+        }
+
+        if (${id}_present) {
+          newResult[${k}] = ${id}.value;
+        }
+
+      `);
+      } else {
+        doc.write(`
+        if (${id}.issues.length) {${prefixStr(id, k)}
+        }
+      `);
+        if (optin === "defaulted") {
+          doc.write(`newResult[${k}] = ${id}.value;`);
+        } else {
+          doc.write(`
+        if (${id}.value !== undefined || ${isPresent}) {
+          newResult[${k}] = ${id}.value;
+        }
+      `);
+        }
+      }
+    }
+    doc.write(`payload.value = newResult;`);
+    doc.write(`return payload;`);
+    return doc.compile();
+  };
+  let fastpass;
+  const isObject2 = isObject;
+  const jit = !globalConfig.jitless;
+  const allowsEval2 = allowsEval;
+  const fastEnabled = jit && allowsEval2.value;
+  const catchall = def.catchall;
+  let value;
+  inst._zod.parse = (payload, ctx) => {
+    value ?? (value = _normalized.value);
+    const input = payload.value;
+    if (!isObject2(input)) {
+      payload.issues.push({
+        expected: "object",
+        code: "invalid_type",
+        input,
+        inst
+      });
+      return payload;
+    }
+    if (jit && fastEnabled && ctx?.async === false && ctx.jitless !== true) {
+      if (!fastpass)
+        fastpass = generateFastpass(def.shape);
+      payload = fastpass(payload, ctx);
+      if (!catchall)
+        return payload;
+      return handleCatchall([], input, payload, ctx, value, inst, ctx?.abortEarly === true);
+    }
+    return superParse(payload, ctx);
   };
 });
 function handleUnionResults(results, final, inst, ctx) {
@@ -1827,6 +2420,161 @@ function handleIntersectionResults(result, left, right) {
   result.value = merged.data;
   return result;
 }
+var $ZodRecord = /* @__PURE__ */ $constructor("$ZodRecord", (inst, def) => {
+  $ZodType.init(inst, def);
+  const memo = globalConfig.memoizer;
+  memo?.attach(inst);
+  inst._zod.parse = (payload, ctx) => {
+    const input = payload.value;
+    if (!isPlainObject(input)) {
+      payload.issues.push({
+        expected: "record",
+        code: "invalid_type",
+        input,
+        inst
+      });
+      return payload;
+    }
+    const proms = [];
+    const values = def.keyType._zod.values;
+    if (values && !def.partial) {
+      payload.value = memo ? memo.alloc(inst, payload, {}, ctx) : {};
+      const recordKeys = new Set;
+      for (const key of values) {
+        if (typeof key === "string" || typeof key === "number" || typeof key === "symbol") {
+          recordKeys.add(typeof key === "number" ? key.toString() : key);
+          if (key === "__proto__")
+            continue;
+          const keyResult = def.keyType._zod.run({ value: key, issues: [] }, ctx);
+          if (keyResult instanceof Promise) {
+            throw new Error("Async schemas not supported in object keys currently");
+          }
+          if (keyResult.issues.length) {
+            payload.issues.push({
+              code: "invalid_key",
+              origin: "record",
+              issues: keyResult.issues.map((iss) => finalizeIssue(iss, ctx, config())),
+              input: key,
+              path: [key],
+              inst
+            });
+            continue;
+          }
+          const outKey = keyResult.value;
+          if (outKey === "__proto__")
+            continue;
+          const result = def.valueType._zod.run({ value: input[key], issues: [] }, ctx);
+          if (result instanceof Promise) {
+            proms.push(result.then((result) => {
+              if (result.issues.length) {
+                payload.issues.push(...prefixIssues(key, result.issues));
+              }
+              payload.value[outKey] = result.value;
+            }));
+          } else {
+            if (result.issues.length) {
+              payload.issues.push(...prefixIssues(key, result.issues));
+            }
+            payload.value[outKey] = result.value;
+          }
+        }
+      }
+      let unrecognized;
+      for (const key in input) {
+        if (!recordKeys.has(key)) {
+          if (def.mode === "loose") {
+            if (key === "__proto__")
+              continue;
+            payload.value[key] = input[key];
+          } else {
+            unrecognized = unrecognized ?? [];
+            unrecognized.push(key);
+          }
+        }
+      }
+      if (unrecognized && unrecognized.length > 0) {
+        payload.issues.push({
+          code: "unrecognized_keys",
+          input,
+          inst,
+          keys: unrecognized,
+          continue: true
+        });
+      }
+    } else {
+      payload.value = memo ? memo.alloc(inst, payload, {}, ctx) : {};
+      let unrecognized;
+      for (const key of Reflect.ownKeys(input)) {
+        if (key === "__proto__")
+          continue;
+        if (!Object.prototype.propertyIsEnumerable.call(input, key))
+          continue;
+        let keyResult = def.keyType._zod.run({ value: key, issues: [] }, ctx);
+        if (keyResult instanceof Promise) {
+          throw new Error("Async schemas not supported in object keys currently");
+        }
+        const checkNumericKey = typeof key === "string" && number.test(key) && keyResult.issues.length;
+        if (checkNumericKey) {
+          const retryResult = def.keyType._zod.run({ value: Number(key), issues: [] }, ctx);
+          if (retryResult instanceof Promise) {
+            throw new Error("Async schemas not supported in object keys currently");
+          }
+          if (retryResult.issues.length === 0) {
+            keyResult = retryResult;
+          }
+        }
+        if (keyResult.issues.length) {
+          if (def.mode === "loose") {
+            payload.value[key] = input[key];
+          } else if (values) {
+            unrecognized = unrecognized ?? [];
+            unrecognized.push(key);
+          } else {
+            payload.issues.push({
+              code: "invalid_key",
+              origin: "record",
+              issues: keyResult.issues.map((iss) => finalizeIssue(iss, ctx, config())),
+              input: key,
+              path: [key],
+              inst
+            });
+          }
+          continue;
+        }
+        const outKey = keyResult.value;
+        if (outKey === "__proto__")
+          continue;
+        const result = def.valueType._zod.run({ value: input[key], issues: [] }, ctx);
+        if (result instanceof Promise) {
+          proms.push(result.then((result) => {
+            if (result.issues.length) {
+              payload.issues.push(...prefixIssues(key, result.issues));
+            }
+            payload.value[outKey] = result.value;
+          }));
+        } else {
+          if (result.issues.length) {
+            payload.issues.push(...prefixIssues(key, result.issues));
+          }
+          payload.value[outKey] = result.value;
+        }
+      }
+      if (unrecognized && unrecognized.length > 0) {
+        payload.issues.push({
+          code: "unrecognized_keys",
+          input,
+          inst,
+          keys: unrecognized,
+          continue: true
+        });
+      }
+    }
+    if (proms.length) {
+      return Promise.all(proms).then(() => payload);
+    }
+    return payload;
+  };
+});
 var $ZodEnum = /* @__PURE__ */ $constructor("$ZodEnum", (inst, def) => {
   $ZodType.init(inst, def);
   const values = getEnumValues(def.entries);
@@ -2799,6 +3547,23 @@ function _int(Class, params) {
     ...normalizeParams(params)
   });
 }
+function _boolean(Class, params) {
+  return new Class({
+    type: "boolean",
+    ...normalizeParams(params)
+  });
+}
+function _unknown(Class) {
+  return new Class({
+    type: "unknown"
+  });
+}
+function _never(Class, params) {
+  return new Class({
+    type: "never",
+    ...normalizeParams(params)
+  });
+}
 function _lt(value, params) {
   return new $ZodCheckLessThan({
     check: "less_than",
@@ -3670,6 +4435,13 @@ var numberProcessor = (schema, ctx, _json, params) => {
       json.allOf = [...json.allOf ?? [], ...rest.map((m) => ({ multipleOf: m }))];
   }
 };
+var booleanProcessor = (_schema, _ctx, json, _params) => {
+  json.type = "boolean";
+};
+var neverProcessor = (_schema, _ctx, json, _params) => {
+  json.not = {};
+};
+var unknownProcessor = (_schema, _ctx, _json, _params) => {};
 var enumProcessor = (schema, _ctx, json, _params) => {
   const def = schema._zod.def;
   const values = getEnumValues(def.entries);
@@ -3703,6 +4475,54 @@ var arrayProcessor = (schema, ctx, _json, params) => {
     path: [...params.path, "items"]
   });
 };
+function inputOptin(schema) {
+  const def = schema._zod.def;
+  if (def.type === "pipe" && def.in._zod.traits.has("$ZodTransform")) {
+    return inputOptin(def.out);
+  }
+  if (def.type === "catch") {
+    return inputOptin(def.innerType);
+  }
+  return schema._zod.optin;
+}
+var objectProcessor = (schema, ctx, _json, params) => {
+  const json = _json;
+  const def = schema._zod.def;
+  const shape = def.shape;
+  const symbolKeys = Object.getOwnPropertySymbols(shape);
+  if (symbolKeys.length && handleUnrepresentable(schema, ctx, json, params, "Symbol keys cannot be represented in JSON Schema")) {
+    return;
+  }
+  json.type = "object";
+  json.properties = {};
+  for (const key in shape) {
+    assignProp(json.properties, key, processSchema(shape[key], ctx, {
+      ...params,
+      path: [...params.path, "properties", key]
+    }));
+  }
+  const requiredKeys = [];
+  for (const key of Object.keys(shape)) {
+    const field = def.shape[key];
+    if (ctx.io === "input" ? inputOptin(field) === undefined : field._zod.optout === undefined) {
+      requiredKeys.push(key);
+    }
+  }
+  if (requiredKeys.length > 0) {
+    json.required = requiredKeys;
+  }
+  if (def.catchall?._zod.def.type === "never") {
+    json.additionalProperties = false;
+  } else if (!def.catchall) {
+    if (ctx.io === "output")
+      json.additionalProperties = false;
+  } else if (def.catchall) {
+    json.additionalProperties = processSchema(def.catchall, ctx, {
+      ...params,
+      path: [...params.path, "additionalProperties"]
+    });
+  }
+};
 var unionProcessor = (schema, ctx, json, params) => {
   const def = schema._zod.def;
   const isExclusive = def.inclusive === false;
@@ -3734,7 +4554,112 @@ var intersectionProcessor = (schema, ctx, json, params) => {
   json.allOf = allOf;
   ctx.intersections.push(allOf);
 };
+function stringifyKeyNames(bySchema, json, visited) {
+  if (json.$ref) {
+    if (visited.has(json))
+      return json;
+    visited.add(json);
+    const def = bySchema.get(json)?.def;
+    if (!def)
+      return json;
+    const inlined = stringifyKeyNames(bySchema, def, visited);
+    return inlined === def ? json : inlined;
+  }
+  for (const keyword of ["anyOf", "oneOf"]) {
+    const branches = json[keyword];
+    if (!Array.isArray(branches))
+      continue;
+    const mapped = branches.map((branch) => stringifyKeyNames(bySchema, branch, visited));
+    if (mapped.some((branch, i) => branch !== branches[i]))
+      json = { ...json, [keyword]: mapped };
+  }
+  const types = Array.isArray(json.type) ? json.type : [json.type];
+  const numericType = !types.includes("string") && types.some((t) => t === "number" || t === "integer");
+  const values = json.enum ?? (json.const !== undefined ? [json.const] : undefined);
+  if (!numericType && !values?.some((v) => typeof v === "number"))
+    return json;
+  const { minimum, maximum, exclusiveMinimum, exclusiveMaximum, multipleOf, format, id, ...rest } = json;
+  if (rest.enum)
+    rest.enum = rest.enum.map((v) => typeof v === "number" ? String(v) : v);
+  else if (typeof rest.const === "number")
+    rest.const = String(rest.const);
+  if (!numericType)
+    return rest;
+  rest.type = "string";
+  if (!values)
+    rest.pattern = (types.includes("number") ? number : integer).source;
+  return rest;
+}
 var pendingRecords = new WeakMap;
+function rewriteKeyNames(ctx) {
+  const bySchema = new Map;
+  for (const entry of ctx.seen.values()) {
+    if (entry.def && !bySchema.has(entry.schema))
+      bySchema.set(entry.schema, entry);
+  }
+  const rewrites = new Map;
+  for (const record of pendingRecords.get(ctx) ?? []) {
+    const seen = ctx.seen.get(record);
+    const names = (seen?.def ?? seen?.schema)?.propertyNames;
+    if (!names || names === true || rewrites.has(names))
+      continue;
+    const rewritten = stringifyKeyNames(bySchema, names, new Set);
+    if (rewritten !== names)
+      rewrites.set(names, rewritten);
+  }
+  if (!rewrites.size)
+    return;
+  for (const entry of ctx.seen.values()) {
+    for (const carrier of [entry.schema, entry.def]) {
+      const rewritten = carrier && rewrites.get(carrier.propertyNames);
+      if (rewritten)
+        carrier.propertyNames = rewritten;
+    }
+  }
+}
+var recordProcessor = (schema, ctx, _json, params) => {
+  const json = _json;
+  const def = schema._zod.def;
+  json.type = "object";
+  const keyType = def.keyType;
+  const patterns = aggregateChecks(keyType).patterns;
+  if (def.mode === "loose" && patterns && patterns.size > 0) {
+    const valueSchema = processSchema(def.valueType, ctx, {
+      ...params,
+      path: [...params.path, "patternProperties", "*"]
+    });
+    json.patternProperties = {};
+    for (const pattern of patterns) {
+      assignProp(json.patternProperties, exactPattern(pattern).source, valueSchema);
+    }
+  } else {
+    if (ctx.target === "draft-07" || ctx.target === "draft-2020-12") {
+      json.propertyNames = processSchema(def.keyType, ctx, {
+        ...params,
+        path: [...params.path, "propertyNames"]
+      });
+      let pending = pendingRecords.get(ctx);
+      if (!pending) {
+        pending = [];
+        pendingRecords.set(ctx, pending);
+        ctx.deferred.push(() => rewriteKeyNames(ctx));
+      }
+      pending.push(schema);
+    }
+    json.additionalProperties = processSchema(def.valueType, ctx, {
+      ...params,
+      path: [...params.path, "additionalProperties"]
+    });
+  }
+  const keyValues = keyType._zod.values;
+  const omittableOnInput = ctx.io === "input" && inputOptin(def.valueType) !== undefined;
+  if (keyValues && !def.partial && !omittableOnInput) {
+    const validKeyValues = [...keyValues].filter((v) => typeof v === "string" || typeof v === "number");
+    if (validKeyValues.length > 0) {
+      json.required = validKeyValues.map(String);
+    }
+  }
+};
 var nullableProcessor = (schema, ctx, json, params) => {
   const def = schema._zod.def;
   const inner = processSchema(def.innerType, ctx, params);
@@ -4373,6 +5298,30 @@ var ZodNumberFormat = /* @__PURE__ */ $constructor("ZodNumberFormat", (inst, def
 function int(params) {
   return _int(ZodNumberFormat, params);
 }
+var ZodBoolean = /* @__PURE__ */ $constructor("ZodBoolean", (inst, def) => {
+  $ZodBoolean.init(inst, def);
+  ZodType.init(inst, def);
+  inst._zod.processJSONSchema = (ctx, json, params) => booleanProcessor(inst, ctx, json, params);
+});
+function boolean2(params) {
+  return _boolean(ZodBoolean, params);
+}
+var ZodUnknown = /* @__PURE__ */ $constructor("ZodUnknown", (inst, def) => {
+  $ZodUnknown.init(inst, def);
+  ZodType.init(inst, def);
+  inst._zod.processJSONSchema = (ctx, json, params) => unknownProcessor(inst, ctx, json, params);
+});
+function unknown() {
+  return _unknown(ZodUnknown);
+}
+var ZodNever = /* @__PURE__ */ $constructor("ZodNever", (inst, def) => {
+  $ZodNever.init(inst, def);
+  ZodType.init(inst, def);
+  inst._zod.processJSONSchema = (ctx, json, params) => neverProcessor(inst, ctx, json, params);
+});
+function never(params) {
+  return _never(ZodNever, params);
+}
 var ZodArray = /* @__PURE__ */ $constructor("ZodArray", (inst, def) => {
   _ensureDefaultMemoizer();
   $ZodArray.init(inst, def);
@@ -4399,6 +5348,64 @@ var ZodArray = /* @__PURE__ */ $constructor("ZodArray", (inst, def) => {
 function array(element, params) {
   return _array(ZodArray, element, params);
 }
+var ZodObject = /* @__PURE__ */ $constructor("ZodObject", (inst, def) => {
+  _ensureDefaultMemoizer();
+  $ZodObjectJIT.init(inst, def);
+  ZodType.init(inst, def);
+  inst._zod.processJSONSchema = (ctx, json, params) => objectProcessor(inst, ctx, json, params);
+  installLazyProp(inst, "shape", (self) => self._zod.def.shape, false);
+}, {
+  keyof() {
+    return _enum(Object.keys(this._zod.def.shape));
+  },
+  catchall(catchall) {
+    return this.clone(mergeDefs(this._zod.def, { catchall }));
+  },
+  passthrough() {
+    return this.clone(mergeDefs(this._zod.def, { catchall: unknown() }));
+  },
+  loose() {
+    return this.clone(mergeDefs(this._zod.def, { catchall: unknown() }));
+  },
+  strict() {
+    return this.clone(mergeDefs(this._zod.def, { catchall: never() }));
+  },
+  strip() {
+    return this.clone(mergeDefs(this._zod.def, { catchall: undefined }));
+  },
+  extend(incoming) {
+    return extend(this, incoming);
+  },
+  safeExtend(incoming) {
+    return safeExtend(this, incoming);
+  },
+  merge(other) {
+    return merge(this, other);
+  },
+  pick(mask) {
+    return pick(this, mask);
+  },
+  omit(mask) {
+    return omit(this, mask);
+  },
+  partial(...args) {
+    return partial(ZodOptional, this, args[0]);
+  },
+  exactPartial(...args) {
+    return partial(ZodExactOptional, this, args[0], "exactPartial");
+  },
+  required(...args) {
+    return required(ZodNonOptional, this, args[0]);
+  }
+});
+function object(shape, params) {
+  const def = {
+    type: "object",
+    shape: shape ?? {},
+    ...normalizeParams(params)
+  };
+  return new ZodObject(def);
+}
 var ZodUnion = /* @__PURE__ */ $constructor("ZodUnion", (inst, def) => {
   $ZodUnion.init(inst, def);
   ZodType.init(inst, def);
@@ -4422,6 +5429,30 @@ function intersection(left, right) {
     type: "intersection",
     left,
     right
+  });
+}
+var ZodRecord = /* @__PURE__ */ $constructor("ZodRecord", (inst, def) => {
+  _ensureDefaultMemoizer();
+  $ZodRecord.init(inst, def);
+  ZodType.init(inst, def);
+  inst._zod.processJSONSchema = (ctx, json, params) => recordProcessor(inst, ctx, json, params);
+  inst.keyType = def.keyType;
+  inst.valueType = def.valueType;
+});
+function record(keyType, valueType, params) {
+  if (!valueType || !valueType._zod) {
+    return new ZodRecord({
+      type: "record",
+      keyType: string2(),
+      valueType: keyType,
+      ...normalizeParams(valueType)
+    });
+  }
+  return new ZodRecord({
+    type: "record",
+    keyType,
+    valueType,
+    ...normalizeParams(params)
   });
 }
 var ZodEnum = /* @__PURE__ */ $constructor("ZodEnum", (inst, def) => {
@@ -4641,21 +5672,150 @@ function refine(fn, _params = {}) {
 function superRefine(fn, params) {
   return _superRefine(fn, params);
 }
+// options.js
+var positive = number2().finite().positive();
+var integer2 = positive.int().max(Number.MAX_SAFE_INTEGER);
+var limits = union([positive, record(string2().min(1), positive)]);
+var optionsSchema = object({
+  limit: limits.optional(),
+  limits: limits.optional(),
+  action: _enum(["warn", "block"]).default("warn"),
+  onBlock: _enum(["stop", "ask"]).default("stop"),
+  warnRatio: positive.max(1).default(0.8),
+  agents: array(string2().min(1)).min(1).default(["*"]),
+  exclude: array(string2().min(1)).default([]),
+  maxOutputTokensOnBlock: integer2.default(1),
+  notify: boolean2().default(true),
+  usdEnabled: boolean2().default(true),
+  persist: boolean2().default(true),
+  stateDirectory: string2().min(1).nullish(),
+  tokenLimit: integer2.nullish(),
+  subagentTokenLimit: integer2.nullish(),
+  runLimit: positive.nullish(),
+  runTokenLimit: integer2.nullish(),
+  historyPageSize: integer2.max(500).default(500),
+  historyMaxPages: integer2.max(1000).default(100),
+  historyTimeoutMs: integer2.max(60000).default(1e4),
+  incompleteHistory: _enum(["block", "warn"]).default("block"),
+  configRefreshMs: integer2.max(240000).default(60000)
+}).strict();
+function validateOptions(options) {
+  const parsed = optionsSchema.safeParse(options);
+  if (!parsed.success)
+    throw new Error("cost-guard: invalid configuration: " + parsed.error.issues.map((issue) => `${issue.path.join(".") || "options"}: ${issue.message}`).join("; "));
+  return parsed.data;
+}
+
+// approval.js
+import { randomUUID } from "node:crypto";
+function createApprovalGate({ now = Date.now } = {}) {
+  const pending = new Map, requests = new Map;
+  const lifetime = 5 * 60000;
+  const key = (plan) => JSON.stringify(plan);
+  const expire = () => {
+    for (const [id, item] of pending)
+      if (now() - item.createdAt >= lifetime)
+        pending.delete(id);
+    for (const [id, request] of requests)
+      if (pending.get(request.key) !== request.item)
+        requests.delete(id);
+  };
+  const prepare = (plan) => {
+    expire();
+    const id = key(plan);
+    let item = pending.get(id);
+    if (!item) {
+      for (const [other, value] of pending)
+        if (value.plan.callerSessionID === plan.callerSessionID)
+          pending.delete(other);
+      const nonce = randomUUID();
+      item = { plan: structuredClone(plan), createdAt: now(), approved: false, question: {
+        header: "Budget extension",
+        question: `Approve budget extension ${nonce}: ${plan.scope} ${plan.targetSessionID}; add USD ${plan.usd ?? 0} and tokens ${plan.tokens ?? 0}?`,
+        options: [
+          { label: "Approve", description: "Grant this exact one-time budget increment." },
+          { label: "Reject", description: "Keep the current budget and stop or replan." }
+        ],
+        multiple: false,
+        custom: false
+      } };
+      pending.set(id, item);
+    }
+    return { questions: [structuredClone(item.question)] };
+  };
+  const matches = (questions, item) => Array.isArray(questions) && questions.length === 1 && questions[0]?.question === item.question.question && questions[0]?.multiple !== true && questions[0]?.options?.length === 2 && questions[0].options[0]?.label === "Approve" && questions[0].options[1]?.label === "Reject";
+  const approve = (item, answers) => {
+    if (Array.isArray(answers) && answers.length === 1 && Array.isArray(answers[0]) && answers[0].length === 1 && answers[0][0] === "Approve")
+      item.approved = true;
+    else
+      pending.delete(key(item.plan));
+  };
+  const event = ({ type, properties: info }) => {
+    expire();
+    if (type === "question.asked") {
+      for (const [id, item] of pending)
+        if (info.sessionID === item.plan.callerSessionID && matches(info.questions, item))
+          requests.set(info.id, { key: id, item, sessionID: info.sessionID });
+    } else if (type === "question.replied" || type === "question.rejected") {
+      const request = requests.get(info.requestID), item = request?.item;
+      requests.delete(info.requestID);
+      if (!item || pending.get(request.key) !== item || request.sessionID !== info.sessionID)
+        return;
+      if (type === "question.rejected")
+        pending.delete(request.key);
+      else
+        approve(item, info.answers);
+    }
+  };
+  const afterQuestion = ({ sessionID, args }, output) => {
+    expire();
+    for (const item of pending.values())
+      if (sessionID === item.plan.callerSessionID && matches(args?.questions, item))
+        approve(item, output?.metadata?.answers);
+  };
+  const consume = (plan) => {
+    expire();
+    const id = key(plan), item = pending.get(id);
+    if (!item?.approved)
+      throw new Error("cost-guard: exact budget extension requires a native user approval; requestExtension first, ask its question, then retry unchanged");
+    pending.delete(id);
+  };
+  return { prepare, event, afterQuestion, consume };
+}
+
 // lib.js
 import os2 from "node:os";
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { randomUUID as randomUUID3 } from "node:crypto";
 
 // accounting.js
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID as randomUUID2 } from "node:crypto";
 var STATE_VERSION = 1;
 var JOURNAL_VERSION = 1;
 var MAX_STATE_BYTES = 8 * 1024 * 1024;
 var MAX_JOURNAL_RECORDS = 1e5;
 var MAX_JOURNAL_BYTES = 64 * 1024 * 1024;
 var CONFIG_LEASE_MS = 5 * 60000;
+var views = new WeakMap;
+var invalidateView = (ledger) => views.delete(ledger);
+var view = (ledger) => {
+  let cached = views.get(ledger);
+  if (!cached) {
+    cached = { ledger: normalizeLedger(ledger), totals: null };
+    views.set(ledger, cached);
+  }
+  return cached;
+};
+var freeze = (value) => {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    for (const child of Object.values(value))
+      freeze(child);
+    Object.freeze(value);
+  }
+  return value;
+};
 var finite = (n) => typeof n === "number" && Number.isFinite(n) && n >= 0;
 function normalizeUsage(info = {}) {
   const t = info.tokens || {};
@@ -4708,7 +5868,7 @@ var winner = (records) => {
   }).at(-1);
   return { ...selected, candidates };
 };
-function recordMessage(ledger, info, { recovered = false, receivedAt = Date.now(), writerID = "local", writerSeq, eventID = randomUUID() } = {}) {
+function recordMessage(ledger, info, { recovered = false, receivedAt = Date.now(), writerID = "local", writerSeq, eventID = randomUUID2() } = {}) {
   if (!info || typeof info.sessionID !== "string" || !info.sessionID || typeof info.id !== "string" || !info.id)
     return false;
   writerSeq ??= Math.max(0, ...Object.values(ledger.messages).flatMap(candidatesOf).filter((record) => record.writerID === writerID).map((record) => record.writerSeq || 0)) + 1;
@@ -4731,12 +5891,14 @@ function recordMessage(ledger, info, { recovered = false, receivedAt = Date.now(
   return mergeRecord(ledger, record);
 }
 function mergeRecord(target, incoming) {
+  invalidateView(target);
   const key = messageKey(incoming.sessionID, incoming.id);
   const prior = target.messages[key];
   target.messages[key] = winner([...prior ? [prior] : [], incoming]);
   return target.messages[key].eventID === incoming.eventID;
 }
 function recordSession(ledger, info, event = {}) {
+  invalidateView(ledger);
   if (!info || typeof info.id !== "string" || !info.id)
     return;
   const prior = ledger.sessions[info.id] || { parentID: null, startAt: null, metadata: {} };
@@ -4764,7 +5926,7 @@ function recordSession(ledger, info, event = {}) {
       projectKey: event.projectKey || info.projectID || null,
       writerID: event.writerID || "local",
       writerSeq: event.writerSeq || 0,
-      eventID: event.eventID || randomUUID()
+      eventID: event.eventID || randomUUID2()
     }
   ]);
   ledger.sessions[info.id] = { ...prior, metadata: { ...prior.metadata }, candidates };
@@ -4783,7 +5945,7 @@ function recordSession(ledger, info, event = {}) {
 function tombstoneSession(ledger, id, event = {}) {
   if (typeof id !== "string" || !id)
     return;
-  (ledger.tombstones ||= []).push({ id, timestamp: event.timestamp ?? Date.now(), writerID: event.writerID || "local", eventID: event.eventID || randomUUID() });
+  (ledger.tombstones ||= []).push({ id, timestamp: event.timestamp ?? Date.now(), writerID: event.writerID || "local", eventID: event.eventID || randomUUID2() });
 }
 function addApproval(ledger, approval) {
   if (approval && typeof approval.id === "string" && approval.id && !ledger.approvals.some((item) => item.id === approval.id))
@@ -4924,36 +6086,35 @@ function deltaLedger(before, after) {
     delta.budget = after.budget;
   return delta;
 }
+var emptyTotals = () => ({
+  cost: 0,
+  costKnownLowerBound: 0,
+  costAvailable: true,
+  tokensComplete: true,
+  input: 0,
+  output: 0,
+  reasoning: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 0,
+  turns: 0,
+  first: null,
+  last: null,
+  models: new Set
+});
 function aggregate(ledger, sessionIDs) {
-  const ids = new Set(sessionIDs), out = {
-    cost: 0,
-    costKnownLowerBound: 0,
-    costAvailable: true,
-    tokensComplete: true,
-    input: 0,
-    output: 0,
-    reasoning: 0,
-    cacheRead: 0,
-    cacheWrite: 0,
-    totalTokens: 0,
-    turns: 0,
-    first: null,
-    last: null,
-    models: new Set
-  };
-  const normalized = normalizeLedger(ledger);
-  for (const record of Object.values(normalized.messages))
-    if (ids.has(record.sessionID)) {
+  const cached = view(ledger);
+  if (!cached.totals) {
+    cached.totals = new Map;
+    for (const record of Object.values(cached.ledger.messages)) {
+      const out = cached.totals.get(record.sessionID) || emptyTotals();
       out.turns++;
       out.costAvailable &&= record.usage.costKnown;
       if (record.usage.costKnown)
         out.cost += record.usage.cost;
       out.tokensComplete &&= record.usage.tokensComplete;
-      out.input += record.usage.tokens.input;
-      out.output += record.usage.tokens.output;
-      out.reasoning += record.usage.tokens.reasoning;
-      out.cacheRead += record.usage.tokens.cacheRead;
-      out.cacheWrite += record.usage.tokens.cacheWrite;
+      for (const key of ["input", "output", "reasoning", "cacheRead", "cacheWrite"])
+        out[key] += record.usage.tokens[key];
       out.totalTokens += record.usage.budgetTokens;
       if (record.createdAt != null) {
         out.first = out.first == null ? record.createdAt : Math.min(out.first, record.createdAt);
@@ -4961,12 +6122,30 @@ function aggregate(ledger, sessionIDs) {
       }
       if (record.model)
         out.models.add(record.model);
+      cached.totals.set(record.sessionID, out);
     }
+  }
+  const out = emptyTotals();
+  for (const id of new Set(sessionIDs)) {
+    const item = cached.totals.get(id);
+    if (!item)
+      continue;
+    for (const key of ["cost", "input", "output", "reasoning", "cacheRead", "cacheWrite", "totalTokens", "turns"])
+      out[key] += item[key];
+    out.costAvailable &&= item.costAvailable;
+    out.tokensComplete &&= item.tokensComplete;
+    if (item.first != null)
+      out.first = out.first == null ? item.first : Math.min(out.first, item.first);
+    if (item.last != null)
+      out.last = out.last == null ? item.last : Math.max(out.last, item.last);
+    for (const model of item.models)
+      out.models.add(model);
+  }
   out.costKnownLowerBound = out.cost;
   return out;
 }
 function descendants(ledger, root) {
-  const value = normalizeLedger(ledger), result = [], seen = new Set, stack = [root];
+  const value = view(ledger).ledger, result = [], seen = new Set, stack = [root];
   while (stack.length) {
     const id = stack.pop();
     if (seen.has(id))
@@ -4979,11 +6158,11 @@ function descendants(ledger, root) {
   }
   return result;
 }
-function canonicalRoot(ledger, id) {
-  return canonicalAncestry(ledger, id);
+function canonicalRoot(ledger, id, expectedProjectKey) {
+  return canonicalAncestry(ledger, id, expectedProjectKey);
 }
 function canonicalAncestry(ledger, id, expectedProjectKey) {
-  const value = normalizeLedger(ledger), seen = new Set;
+  const value = view(ledger).ledger, seen = new Set;
   let current = id, depth = 0, project = null;
   while (true) {
     if (seen.has(current))
@@ -5115,7 +6294,10 @@ async function createStore({ directory, filename, projectDirectory = process.cwd
   const legacyFile = path.join(base, `${project}-${filename}`);
   if (persist)
     await ensureDirectory(journalDir);
-  const read = async () => {
+  let cached = freeze(newLedger()), seen = new Map, bytes = 0, legacySignature = null;
+  let reading = Promise.resolve();
+  const stats = { eventReads: 0, fullReplays: 0 };
+  const readOnce = async () => {
     if (!persist)
       return newLedger();
     const names = await fs.readdir(journalDir).catch((error) => {
@@ -5126,22 +6308,34 @@ async function createStore({ directory, filename, projectDirectory = process.cwd
     const events = names.filter((name) => name.endsWith(".event")).sort();
     if (events.length > MAX_JOURNAL_RECORDS)
       throw new Error(`accounting journal exceeds ${MAX_JOURNAL_RECORDS} events; usage is incomplete`);
-    let bytes = 0;
-    const ledgers = [];
+    const present = new Set(events);
+    for (const name of seen.keys())
+      if (!present.has(name))
+        throw new Error("accounting journal event disappeared; usage is incomplete");
+    let signature = "absent", legacy = null;
     try {
-      const legacyStat = await fs.stat(legacyFile);
-      if (legacyStat.size > MAX_STATE_BYTES)
+      const stat = await fs.stat(legacyFile);
+      if (stat.size > MAX_STATE_BYTES)
         throw new Error("legacy accounting snapshot exceeds 8 MiB");
-      ledgers.push(normalizeLedger(JSON.parse(await fs.readFile(legacyFile, "utf8"))));
+      signature = `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.ino}`;
+      if (signature !== legacySignature)
+        legacy = normalizeLedger(JSON.parse(await fs.readFile(legacyFile, "utf8")));
     } catch (error) {
       if (error.code !== "ENOENT")
         throw new Error(`cannot import legacy snapshot ${legacyFile}: ${error.message}`, { cause: error });
     }
+    const reset = signature !== legacySignature;
+    const additions = [], sizes = new Map;
+    let nextBytes = reset ? 0 : bytes;
     for (const name of events) {
+      if (!reset && seen.has(name))
+        continue;
       const file = path.join(journalDir, name), stat = await fs.stat(file);
-      bytes += stat.size;
-      if (bytes > MAX_JOURNAL_BYTES)
+      nextBytes += stat.size;
+      if (nextBytes > MAX_JOURNAL_BYTES)
         throw new Error(`accounting journal exceeds ${MAX_JOURNAL_BYTES} bytes; usage is incomplete`);
+      if (stat.size > MAX_STATE_BYTES)
+        throw new Error("accounting journal event exceeds 8 MiB");
       let event;
       try {
         event = JSON.parse(await fs.readFile(file, "utf8"));
@@ -5150,19 +6344,36 @@ async function createStore({ directory, filename, projectDirectory = process.cwd
       }
       if (event.version !== JOURNAL_VERSION || !event.payload || typeof event.eventID !== "string")
         throw new Error(`invalid journal event schema: ${name}`);
-      ledgers.push(event.payload);
+      stats.eventReads++;
+      additions.push(event.payload);
+      sizes.set(name, stat.size);
     }
-    return mergeLedger(...ledgers);
+    if (reset || additions.length)
+      cached = freeze(mergeLedger(reset ? legacy : cached, ...additions));
+    if (reset) {
+      seen = new Map;
+      stats.fullReplays++;
+    }
+    for (const [name, size] of sizes)
+      seen.set(name, size);
+    bytes = nextBytes;
+    legacySignature = signature;
+    return cached;
+  };
+  const read = () => {
+    reading = reading.catch(() => {}).then(readOnce);
+    return reading;
   };
   return {
     file: journalDir,
     load: read,
     replaceFromDisk: read,
+    stats: () => ({ ...stats }),
     async append(event) {
       if (!persist)
         return;
-      const eventID = event.eventID || randomUUID(), name = `${eventID}-${randomUUID()}.event`, final = path.join(journalDir, name);
-      const temporary = path.join(journalDir, `.${eventID}.${process.pid}.${randomUUID()}.tmp`), content = serializeRecord({ version: JOURNAL_VERSION, eventID, payload: event.payload });
+      const eventID = event.eventID || randomUUID2(), name = `${eventID}-${randomUUID2()}.event`, final = path.join(journalDir, name);
+      const temporary = path.join(journalDir, `.${eventID}.${process.pid}.${randomUUID2()}.tmp`), content = serializeRecord({ version: JOURNAL_VERSION, eventID, payload: event.payload });
       try {
         await fs.writeFile(temporary, content, { mode: 384, flag: "wx" });
         await publication.beforeRename?.({ temporary, final });
@@ -5243,6 +6454,23 @@ function resolveLimit(cfg, agent) {
   }
   return cfg.limit;
 }
+async function guardRequest(method, args, timeoutMs) {
+  const controller = new AbortController;
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => method({ ...args, signal: controller.signal }, { signal: controller.signal })),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new Error("host request timed out"));
+        }, timeoutMs);
+      })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 var projectKeyForDirectory = (directory) => projectKey(directory);
 function fmtNum(n) {
   const v = Number(n) || 0;
@@ -5279,32 +6507,28 @@ function explainCost(s) {
 function normalizeOptions(options = {}) {
   const envLimit = process.env.OPENCODE_COST_GUARD_LIMIT;
   const envAction = process.env.OPENCODE_COST_GUARD_ACTION;
-  const spec = envLimit != null ? Number(envLimit) : options.limits ?? options.limit;
-  const parsed = parseLimits(spec, 5);
-  const action = String(envAction ?? options.action ?? "warn").toLowerCase();
-  const cfg = {
+  const effective = validateOptions({
+    ...options,
+    ...envLimit != null ? { limit: Number(envLimit), limits: undefined } : {},
+    ...envAction != null ? { action: envAction.toLowerCase() } : {}
+  });
+  const parsed = parseLimits(effective.limits ?? effective.limit, 5);
+  return {
+    ...effective,
     limit: parsed.default,
     limits: parsed.perAgent,
-    action: action === "block" ? "block" : "warn",
-    warnRatio: typeof options.warnRatio === "number" && options.warnRatio > 0 && options.warnRatio <= 1 ? options.warnRatio : 0.8,
-    agents: Array.isArray(options.agents) && options.agents.length ? options.agents.map(String) : ["*"],
-    exclude: Array.isArray(options.exclude) ? options.exclude.map(String) : [],
-    maxOutputTokensOnBlock: typeof options.maxOutputTokensOnBlock === "number" && options.maxOutputTokensOnBlock >= 1 ? options.maxOutputTokensOnBlock : 1,
-    onBlock: options.onBlock === "ask" ? "ask" : "stop",
-    notify: options.notify !== false,
-    tokenLimit: Number.isSafeInteger(options.tokenLimit) && options.tokenLimit > 0 ? options.tokenLimit : null,
-    subagentTokenLimit: Number.isSafeInteger(options.subagentTokenLimit) && options.subagentTokenLimit > 0 ? options.subagentTokenLimit : null,
-    runLimit: Number.isFinite(options.runLimit) && options.runLimit > 0 ? options.runLimit : null,
-    runTokenLimit: Number.isSafeInteger(options.runTokenLimit) && options.runTokenLimit > 0 ? options.runTokenLimit : null,
-    usdEnabled: options.usdEnabled !== false,
-    persist: options.persist !== false,
-    stateDirectory: typeof options.stateDirectory === "string" ? options.stateDirectory : null
+    tokenLimit: effective.tokenLimit ?? null,
+    subagentTokenLimit: effective.subagentTokenLimit ?? null,
+    runLimit: effective.runLimit ?? null,
+    runTokenLimit: effective.runTokenLimit ?? null,
+    stateDirectory: effective.stateDirectory ?? null
   };
-  return cfg;
 }
 function createCostGuardController(cfg, client, projectDirectory, projectContext = {}) {
   const sessions = new Map;
   let ledger = newLedger();
+  const approvalGate = createApprovalGate();
+  const historyCoverage = new Map;
   let storePromise = cfg.persist ? createStore({ directory: cfg.stateDirectory, filename: "cost-guard.json", projectDirectory }) : Promise.resolve(null);
   let writeQueue = Promise.resolve();
   let writerSeq = 0;
@@ -5320,11 +6544,11 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
   let recoveredSessions = new Map;
   const verifiedMetadataRequests = new Map;
   const enqueue = (mutation) => {
-    writeQueue = writeQueue.then(async () => {
+    writeQueue = writeQueue.catch(() => {}).then(async () => {
       await ready;
       const store = await storePromise;
       if (store) {
-        const eventID = randomUUID2();
+        const eventID = randomUUID3();
         const before = await store.load();
         ledger = before;
         const draft = mergeLedger(before);
@@ -5335,7 +6559,7 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
           await store.append({ eventID, payload: delta });
         ledger = changed;
       } else {
-        const returned = mutation(ledger, randomUUID2());
+        const returned = mutation(ledger, randomUUID3());
         if (returned && returned.version)
           ledger = returned;
       }
@@ -5349,7 +6573,7 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
       if (typeof client?.session?.get !== "function")
         return false;
       try {
-        const response = await client.session.get({ path: { id: sessionID } });
+        const response = await guardRequest(client.session.get.bind(client.session), { path: { id: sessionID } }, cfg.historyTimeoutMs);
         const info = response?.data;
         if (!info || response.error || info.id !== sessionID || typeof info.directory !== "string" || await projectKeyForDirectory(info.directory) !== projectKey || typeof info.projectID !== "string")
           return false;
@@ -5404,28 +6628,56 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
       return recoveredSessions.get(sessionID);
     const recovery = (async () => {
       await ready;
-      if (typeof client?.session?.messages !== "function")
-        return;
+      let before;
+      const seen = new Set;
       try {
-        const response = await client.session.messages({ path: { id: sessionID }, query: { limit: 500 } });
-        const entries = response?.data ?? response;
-        if (!Array.isArray(entries) || entries.length >= 500)
-          return;
-        const recovered = newLedger();
-        for (const entry of entries) {
-          const info = entry?.info;
-          if (info?.role === "assistant")
-            recordMessage(recovered, { ...info, sessionID: info.sessionID || sessionID }, { recovered: true, writerID: projectContext.instanceID || `${process.pid}` });
+        if (typeof client?.session?.messages !== "function")
+          throw new Error("session.messages API unavailable");
+        for (let page = 0;page < cfg.historyMaxPages; page++) {
+          const response = await guardRequest(client.session.messages.bind(client.session), {
+            path: { id: sessionID },
+            query: { limit: cfg.historyPageSize, ...before ? { before } : {} }
+          }, cfg.historyTimeoutMs);
+          if (response?.error)
+            throw new Error("session.messages API failed");
+          const entries = response?.data ?? response;
+          if (!Array.isArray(entries))
+            throw new Error("invalid message page");
+          const recovered = newLedger();
+          for (const entry of entries) {
+            const info = entry?.info;
+            if (!info?.id || info.sessionID !== sessionID)
+              throw new Error("invalid or cross-session message page");
+            if (info.role === "assistant")
+              recordMessage(recovered, info, { recovered: true, writerID: projectContext.instanceID || `${process.pid}` });
+          }
+          if (hasChanges(recovered))
+            await enqueue((current) => mergeLedger(current, recovered));
+          const headers = response?.response?.headers ?? response?.headers;
+          const cursor = headers?.get?.("x-next-cursor") ?? headers?.["x-next-cursor"];
+          if (!cursor && (entries.length < cfg.historyPageSize || headers && entries.length === cfg.historyPageSize)) {
+            historyCoverage.set(sessionID, { complete: true });
+            return;
+          }
+          if (!cursor || seen.has(cursor))
+            throw new Error("missing or repeated history cursor");
+          seen.add(cursor);
+          before = cursor;
         }
-        await enqueue((current) => mergeLedger(current, recovered));
-      } catch {}
+        throw new Error("history page bound reached");
+      } catch (error) {
+        historyCoverage.set(sessionID, { complete: false, reason: error.message });
+        await log("warn", `history coverage incomplete: ${error.message}`, { sessionID });
+      }
     })();
     recoveredSessions.set(sessionID, recovery);
-    return recovery;
+    await recovery;
+    if (!historyCoverage.get(sessionID)?.complete)
+      recoveredSessions.delete(sessionID);
   };
   const refresh = async () => {
     await ready;
-    writeQueue = writeQueue.then(async () => {
+    writeQueue = writeQueue.catch(() => {}).then(async () => {
       const store = await storePromise;
       if (store)
         ledger = await store.replaceFromDisk();
@@ -5477,6 +6729,7 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
   };
   const verifiedTaskNotice = async (callerSessionID, limit = 8) => appendSubagentCheckpoints("", await verifiedTaskEntries(callerSessionID), { limit });
   let generation = 0;
+  let lastConfigPublication = 0;
   const budgetSnapshot = () => ({
     schema: "opencode-cost-guard-budget-v1",
     version: 1,
@@ -5492,15 +6745,15 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
     usdEnabled: cfg.usdEnabled
   });
   const publishConfig = async () => {
-    if (!cfg.persist)
+    if (!cfg.persist || Date.now() - lastConfigPublication < cfg.configRefreshMs)
       return;
     const instanceID = projectContext.instanceID || `${os2.hostname()}:${process.pid}`;
     const config = budgetSnapshot();
     const fingerprint = JSON.stringify({ ...config, approvals: undefined });
-    const eventID = randomUUID2();
+    const eventID = randomUUID3();
     const leaseEvent = {
       eventID,
-      projectKey: projectContext.projectKey,
+      projectKey,
       instanceID,
       pid: process.pid,
       hostname: os2.hostname(),
@@ -5510,6 +6763,7 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
       publishedAt: Date.now()
     };
     await enqueue((current) => addConfig(current, leaseEvent));
+    lastConfigPublication = Date.now();
   };
   const setBudget = async (budget) => enqueue((current) => {
     current.budget = { ...budget, approvals: current.approvals };
@@ -5562,16 +6816,6 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
     };
     session.turnCount = totals.turns;
     session.models = totals.models;
-    session.messages.clear();
-    for (const record of Object.values(ledger.messages))
-      if (record.sessionID === id) {
-        session.messages.set(record.id, { cost: record.usage.cost, tokens: {
-          input: record.usage.tokens.input,
-          output: record.usage.tokens.output,
-          reasoning: record.usage.tokens.reasoning,
-          cache: { read: record.usage.tokens.cacheRead, write: record.usage.tokens.cacheWrite }
-        }, model: record.model });
-      }
     return session;
   };
   const applies = (agent) => anyMatch(cfg.agents, agent) && !anyMatch(cfg.exclude, agent);
@@ -5620,11 +6864,13 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
     }
     if (usageOver || runOver)
       return true;
+    if (cfg.incompleteHistory === "block" && historyCoverage.get(sessionID)?.complete !== true)
+      return true;
     if (s.blocked)
       s.blocked = false;
     return false;
   };
-  const extend = async (callerSessionID, usd, tokens, scope = "session", targetSessionID = callerSessionID) => {
+  const planExtension = async (callerSessionID, usd, tokens, scope = "session", targetSessionID = callerSessionID) => {
     await recoverAncestry(callerSessionID);
     if (targetSessionID !== callerSessionID)
       await recoverAncestry(targetSessionID);
@@ -5635,8 +6881,17 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
       throw new Error("cost-guard: target session is not a verified descendant in the caller's project");
     if (scope === "run" && !targetAncestry.complete)
       throw new Error("cost-guard: run extension requires verified root ancestry");
+    if (!callerAncestry.complete || !callerAncestry.isRoot || callerAncestry.projectKey !== projectKey)
+      throw new Error("cost-guard: only the verified parent root may approve a budget extension; return this blocker to the parent");
+    if (!["session", "run"].includes(scope))
+      throw new Error("cost-guard: invalid budget scope");
     if (targetSessionID !== callerSessionID && scope === "run")
       throw new Error("cost-guard: cross-session run extensions are not allowed");
+    await ensureRecovered(callerSessionID);
+    if (targetSessionID !== callerSessionID)
+      await ensureRecovered(targetSessionID);
+    if (cfg.incompleteHistory === "block" && [callerSessionID, targetSessionID].some((id) => historyCoverage.get(id)?.complete !== true))
+      throw new Error("cost-guard: history coverage incomplete; repair history access before requesting a budget extension");
     const s = refreshSession(targetSessionID);
     const root = scope === "run" ? targetAncestry.id : targetSessionID;
     const dimensions = [];
@@ -5678,6 +6933,23 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
           throw new Error("cost-guard: no active budget dimension to extend");
       }
     }
+    return {
+      callerSessionID,
+      targetSessionID,
+      scope,
+      usd: dimensions.find((item) => item.usd != null)?.usd ?? null,
+      tokens: dimensions.find((item) => item.tokens != null)?.tokens ?? null
+    };
+  };
+  const requestExtension = async (...args) => approvalGate.prepare(await planExtension(...args));
+  const extend = async (...args) => {
+    const plan = await planExtension(...args);
+    approvalGate.consume(plan);
+    const { callerSessionID, targetSessionID, usd, tokens, scope } = plan;
+    const targetAncestry = canonicalRoot(ledger, targetSessionID, projectKey);
+    const s = refreshSession(targetSessionID);
+    const root = scope === "run" ? targetAncestry.id : targetSessionID;
+    const dimensions = [...usd == null ? [] : [{ usd }], ...tokens == null ? [] : [{ tokens }]];
     const approval = { id: `${process.pid}:${Date.now()}:${Math.random()}`, scope, sessionID: root, dimensions, createdAt: Date.now() };
     await enqueue((current, eventID) => addApproval(current, { ...approval, id: eventID, eventID }));
     s.blocked = false;
@@ -5696,11 +6968,12 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
       ancestry: targetAncestry
     }).effectiveSessionTokenLimit;
   };
-  const isAskTool = (tool) => tool === "question" || String(tool).includes("cost_guard");
+  const isAskTool = (tool) => tool === "question" || tool === "cost_guard_extend";
   const describe = (sessionID) => explainCost(get(sessionID));
   const hooks = {
     event: async ({ event }) => {
       await ready;
+      approvalGate.event(event);
       if (event.type === "message.updated") {
         const info = event.properties.info;
         if (info.role === "assistant") {
@@ -5712,6 +6985,7 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
         }
       } else if (event.type === "session.created" || event.type === "session.updated") {
         const info = event.properties.info;
+        verifiedMetadataRequests.delete(info.id);
         if (typeof info.title === "string")
           transientTitles.set(info.id, info.title.slice(0, 512));
         let verified = false;
@@ -5729,6 +7003,9 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
             projectKey: verified ? projectKey : null
           });
         });
+      } else if (event.type === "session.idle") {
+        await refresh();
+        await publishConfig();
       } else if (event.type === "session.deleted") {
         await enqueue((current, eventID) => {
           tombstoneSession(current, event.properties.info.id, { eventID, writerID: projectContext.instanceID || `${process.pid}` });
@@ -5741,6 +7018,8 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
         s.agent = input.agent;
     },
     "chat.params": async (input, output) => {
+      await ensureRecovered(input.sessionID);
+      await recoverAncestry(input.sessionID);
       await refresh();
       const s = refreshSession(input.sessionID);
       if (input.agent)
@@ -5760,6 +7039,7 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
       }
     },
     "tool.execute.before": async (input) => {
+      await ensureRecovered(input.sessionID);
       await recoverAncestry(input.sessionID);
       await refresh();
       const s = refreshSession(input.sessionID);
@@ -5779,6 +7059,11 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
       const over = await overLimit(input.sessionID);
       if (!over || cfg.action !== "block")
         return;
+      if (cfg.onBlock === "ask" && isAskTool(input.tool))
+        return;
+      const coverage = historyCoverage.get(input.sessionID);
+      if (cfg.incompleteHistory === "block" && coverage?.complete !== true)
+        throw new Error(`cost-guard: history coverage incomplete (${coverage?.reason || "not recovered"}). Repair host/history access or recovery bounds, then retry. Budget extensions do not repair coverage; subagents must return this blocker to their parent.`);
       if (cfg.onBlock === "ask") {
         if (isAskTool(input.tool))
           return;
@@ -5803,7 +7088,7 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
           limit: effective.subagentEffectiveLimit,
           approvalTokens: effective.subagentBaseLimit
         })} Parent root ${ancestry.id} is the authority for this decision. ` : "Ask the user whether to continue and how much extra USD or tokens to grant, then call cost_guard_extend and resume; otherwise stop. The existing question tool remains available when permitted. ";
-        throw new Error(`cost-guard: active budget exceeded. ${checkpoint}input ${totals.input} + output ${totals.output} + reasoning ${totals.reasoning} = ${totals.totalTokens} budget tokens (cache excluded). ${explainCost(s)}`);
+        throw new Error(`cost-guard: active budget exceeded or history coverage incomplete (${historyCoverage.get(input.sessionID)?.reason || "coverage available"}). ${checkpoint}input ${totals.input} + output ${totals.output} + reasoning ${totals.reasoning} = ${totals.totalTokens} budget tokens (cache excluded). ${explainCost(s)}`);
       }
       if (!s.blocked) {
         s.blocked = true;
@@ -5818,7 +7103,10 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
       throw new Error(`cost-guard: session or run usage exceeded an active budget` + `${s.agent ? ` (agent ${s.agent})` : ""}. Raise the limit or switch to a cheaper model.
 ` + explainCost(s));
     },
-    "tool.execute.after": async ({ tool, sessionID }, output) => {
+    "tool.execute.after": async (input, output) => {
+      const { tool, sessionID } = input;
+      if (tool === "question")
+        approvalGate.afterQuestion(input, output);
       if (tool !== "task" || !output || typeof output !== "object")
         return;
       const entries = await verifiedTaskEntries(sessionID);
@@ -5834,6 +7122,7 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
   return {
     hooks,
     extend,
+    requestExtension,
     describe,
     ready,
     refresh,
@@ -5862,24 +7151,32 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
 }
 
 // index.js
-import { randomUUID as randomUUID3 } from "node:crypto";
+import { randomUUID as randomUUID4 } from "node:crypto";
 async function loadFileOptions() {
   try {
     const fs = await import("node:fs/promises");
     const p = process.env.OPENCODE_COST_GUARD_CONFIG || (process.env.HOME ? `${process.env.HOME}/.config/opencode/cost-guard.json` : null);
     if (!p)
       return null;
-    return JSON.parse(await fs.readFile(p, "utf8"));
-  } catch {
-    return null;
+    const parsed = JSON.parse(await fs.readFile(p, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      throw new Error("configuration must be an object");
+    return parsed;
+  } catch (error) {
+    if (error.code === "ENOENT" && !process.env.OPENCODE_COST_GUARD_CONFIG)
+      return null;
+    throw new Error(`cost-guard: cannot load configuration: ${error.message}`, { cause: error });
   }
 }
 var CostGuard = async ({ client, directory }, options) => {
   const fileOptions = await loadFileOptions();
-  const cfg = normalizeOptions({ ...fileOptions || {}, ...options || {} });
+  const merged = { ...fileOptions || {}, ...options || {} };
+  if (Object.hasOwn(options || {}, "limit") && !Object.hasOwn(options || {}, "limits"))
+    delete merged.limits;
+  const cfg = normalizeOptions(merged);
   const projectDirectory = directory?.worktree || directory?.project || directory || process.cwd();
   const key = await projectKey(projectDirectory);
-  const controller = createCostGuardController(cfg, client, projectDirectory, { projectKey: key, instanceID: randomUUID3() });
+  const controller = createCostGuardController(cfg, client, projectDirectory, { projectKey: key, instanceID: randomUUID4() });
   const { hooks, extend, describe } = controller;
   hooks.config = async () => {
     await controller.ready;
@@ -5889,7 +7186,7 @@ var CostGuard = async ({ client, directory }, options) => {
   if (cfg.onBlock === "ask") {
     hooks.tool = {
       cost_guard_extend: {
-        description: "Cost guard: after explicit user approval, add USD and/or total tokens to the session or run budget. Without amounts, session scope retains the default USD extension; token-only mode adds one active base token limit.",
+        description: "Cost guard: root-only budget extension. First call returns an exact native question; ask it with question, then retry unchanged after approval. Without amounts, session scope retains the default USD extension; token-only mode adds one active base token limit.",
         args: {
           usd: number2().positive().optional().describe("USD to add"),
           tokens: number2().int().positive().optional().describe("Total session/run tokens to add"),
@@ -5901,8 +7198,8 @@ var CostGuard = async ({ client, directory }, options) => {
           let callerMetadata, targetMetadata;
           if (requested !== context.sessionID) {
             const [caller, target] = await Promise.all([
-              client.session?.get?.({ path: { id: context.sessionID } }),
-              client.session?.get?.({ path: { id: requested } })
+              guardRequest((input, settings) => client.session?.get?.(input, settings), { path: { id: context.sessionID } }, cfg.historyTimeoutMs),
+              guardRequest((input, settings) => client.session?.get?.(input, settings), { path: { id: requested } }, cfg.historyTimeoutMs)
             ]);
             const valid = (result, id) => result && !result.error && result.data?.id === id && typeof result.data.directory === "string" && typeof result.data.projectID === "string";
             if (!valid(caller, context.sessionID) || !valid(target, requested) || await projectKey(caller.data.directory) !== await projectKey(projectDirectory) || await projectKey(target.data.directory) !== await projectKey(projectDirectory))
@@ -5918,7 +7215,15 @@ var CostGuard = async ({ client, directory }, options) => {
             await controller.ingestSession(targetMetadata);
             await controller.recoverAncestry(requested);
           }
-          const result = await extend(context.sessionID, args?.usd, args?.tokens, args?.scope || "session", requested);
+          const question = await controller.requestExtension(context.sessionID, args?.usd, args?.tokens, args?.scope || "session", requested);
+          let result;
+          try {
+            result = await extend(context.sessionID, args?.usd, args?.tokens, args?.scope || "session", requested);
+          } catch (error) {
+            if (!error.message.startsWith("cost-guard: exact budget extension requires"))
+              throw error;
+            return `cost-guard: user approval required; no budget changed. Call the native question tool with ${JSON.stringify(question)}, then retry this extension unchanged. Never answer it yourself.`;
+          }
           return `cost-guard: approved ${args?.scope || "session"} budget extension recorded for ${requested} (${result}).
 ${describe(requested)}`;
         }
