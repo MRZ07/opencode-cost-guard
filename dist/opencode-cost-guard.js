@@ -5876,7 +5876,7 @@ function recordMessage(ledger, info, { recovered = false, receivedAt = Date.now(
     sessionID: info.sessionID,
     id: info.id,
     usage: normalizeUsage(info),
-    mode: typeof info.mode === "string" ? info.mode : null,
+    mode: typeof info.agent === "string" ? info.agent : typeof info.mode === "string" ? info.mode : null,
     model: info.providerID && info.modelID ? `${info.providerID}/${info.modelID}` : null,
     createdAt: Number.isFinite(info.time?.created) ? info.time.created : null,
     updatedAt: Number.isFinite(info.time?.updated) ? info.time.updated : null,
@@ -6226,9 +6226,25 @@ function effectiveBudgetLimits(config, { agent, sessionID, rootID, approvals = [
     runTokenLimit: !Number.isFinite(config.runTokenLimit) ? null : config.runTokenLimit + runExtensionTokens
   };
 }
-function formatSubagentCheckpoint({ id, title, totalTokens, input, output, reasoning, limit, approvalTokens }) {
+function formatSubagentCheckpoint({ id, title, totalTokens, input, output, reasoning, limit, approvalTokens, rootID, blockers, canExtend = true }) {
   const marker = `<!-- cost-guard-checkpoint:${id} -->`;
   const safeTitle = typeof title === "string" ? ` (${title.replace(/[<>]/g, "").slice(0, 80)})` : "";
+  if (blockers) {
+    const facts = blockers.map(({ scope, dimension, usage, limit }) => `${scope} ${dimension}: ${usage}/${limit}`).join("; ");
+    if (!canExtend)
+      return `${marker}
+Budget checkpoint: ${id}${safeTitle}; root ${rootID || "unverified"}; ${facts}. Stop and preserve pending work; onBlock=stop exposes no extension tool. Return this blocker to the primary agent.`;
+    const commands = ["session", "run"].flatMap((scope) => {
+      const group = blockers.filter((item) => item.scope === scope);
+      if (!group.length)
+        return [];
+      const amounts = group.map(({ dimension, increment }) => `${dimension}:${increment}`).join(", ");
+      const target = scope === "session" ? `sessionID:${JSON.stringify(id)}` : 'scope:"run"';
+      return [`cost_guard_extend({${amounts}, ${target}})`];
+    }).join(" then ");
+    return `${marker}
+Budget checkpoint: ${id}${safeTitle}; root ${rootID || "unverified"}; ${facts}. Lifetime tokens ${totalTokens}: input ${input} + output ${output} + reasoning ${reasoning} (cache excluded). Ask the user: (1) Evaluate stuck first from existing progress/failure evidence; recommend Continue or Stop; (2) Continue only after approval; proposed increments ${commands}: request the exact native question, ask it, then retry unchanged only after Approve; or (3) Stop. Evaluation does not approve or unlock. Get final user approval before any extension or restart. Helpers return this blocker; only the verified root can extend. Run scope targets the root itself. Recheck all blockers before resuming the same task; fresh helpers do not bypass run caps.`;
+  }
   return `${marker}
 Subagent checkpoint: ${id}${safeTitle}; ${totalTokens}/${limit} lifetime tokens; input ${input} + output ${output} + reasoning ${reasoning} (cache excluded). Ask the user: (1) Evaluate stuck first: inspect available task results, prior errors, repeated failed checks, and evidence of no progress; state only supported findings and recommend Continue, Stop, or a distinct fresh attempt; (2) Continue only after approval, using cost_guard_extend({tokens:${approvalTokens}, sessionID:"${id}"}); or (3) Stop. Evaluation does not approve or unlock. Get final user approval before any extension or restart. A fresh attempt has a new session, not erased usage or bypassed run caps; token extension may leave USD/run blockers active.`;
 }
@@ -6416,13 +6432,6 @@ async function createStore({ directory, filename, projectDirectory = process.cwd
 }
 
 // lib.js
-function anyMatch(patterns, value) {
-  if (!patterns || patterns.length === 0)
-    return false;
-  if (value == null)
-    return patterns.includes("*");
-  return patterns.some((p) => globMatch(p, value));
-}
 function parseLimits(raw, fallback = 5) {
   const isUsd = (n) => Number.isFinite(n) && n > 0;
   if (raw == null)
@@ -6685,45 +6694,19 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
     await writeQueue;
   };
   const verifiedTaskEntries = async (callerSessionID) => {
+    if (cfg.action !== "block")
+      return [];
     await recoverAncestry(callerSessionID);
     await refresh();
     const caller = canonicalRoot(ledger, callerSessionID, projectKey);
     if (!caller.complete || caller.isRoot !== true)
       return [];
-    const candidates = descendants(ledger, callerSessionID).filter((id) => id !== callerSessionID);
     const eligible = [];
-    for (const childID of candidates) {
-      const ancestry = canonicalRoot(ledger, childID, projectKey);
-      if (!ancestry.complete || ancestry.id !== callerSessionID)
+    for (const childID of descendants(ledger, callerSessionID).filter((id) => id !== callerSessionID)) {
+      const state = budgetState(childID);
+      if (!state.ancestry.complete || state.ancestry.id !== callerSessionID || !state.blockers.length)
         continue;
-      const totals = aggregate(ledger, [childID]);
-      const child = ledger.sessions[childID];
-      const agent = [...Object.values(ledger.messages)].find((message) => message.sessionID === childID)?.mode || "unknown";
-      const effective = effectiveBudgetLimits({
-        subagentTokenLimit: cfg.subagentTokenLimit,
-        tokenLimit: cfg.tokenLimit,
-        agents: cfg.agents,
-        exclude: cfg.exclude,
-        usdEnabled: cfg.usdEnabled
-      }, {
-        agent,
-        sessionID: childID,
-        rootID: callerSessionID,
-        approvals: ledger.approvals,
-        ancestry
-      });
-      if (effective.subagentEffectiveLimit == null || totals.totalTokens < effective.subagentEffectiveLimit)
-        continue;
-      eligible.push({
-        id: childID,
-        title: transientTitles.get(childID),
-        totalTokens: totals.totalTokens,
-        input: totals.input,
-        output: totals.output,
-        reasoning: totals.reasoning,
-        limit: effective.subagentEffectiveLimit,
-        approvalTokens: effective.subagentBaseLimit
-      });
+      eligible.push(checkpointEntry(childID, state));
     }
     return eligible;
   };
@@ -6806,6 +6789,10 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
   const refreshSession = (id) => {
     const session = get(id);
     const totals = aggregate(ledger, [id]);
+    if (!session.agent) {
+      const latest = Object.values(ledger.messages).filter((message) => message.sessionID === id && message.mode).sort((a, b) => (b.createdAt ?? b.receivedAt) - (a.createdAt ?? a.receivedAt))[0];
+      session.agent = latest?.mode;
+    }
     session.cost = totals.cost;
     session.tokens = {
       input: totals.input,
@@ -6818,7 +6805,6 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
     session.models = totals.models;
     return session;
   };
-  const applies = (agent) => anyMatch(cfg.agents, agent) && !anyMatch(cfg.exclude, agent);
   const log = async (level, message, extra) => {
     if (!cfg.notify && level !== "error")
       return;
@@ -6826,43 +6812,65 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
       await client.app.log({ body: { service: "cost-guard", level, message, extra } });
     } catch {}
   };
-  const overLimit = async (sessionID) => {
+  const budgetState = (sessionID) => {
     const s = refreshSession(sessionID);
-    const enforceSession = applies(s.agent);
     const ancestry = canonicalRoot(ledger, sessionID, projectKey);
-    const effective = effectiveBudgetLimits({
-      sessionLimit: cfg.limit,
-      limits: cfg.limits,
-      agents: cfg.agents,
-      exclude: cfg.exclude,
-      tokenLimit: cfg.tokenLimit,
-      subagentTokenLimit: cfg.subagentTokenLimit,
-      runLimit: cfg.runLimit,
-      runTokenLimit: cfg.runTokenLimit,
-      usdEnabled: cfg.usdEnabled
-    }, { agent: s.agent || "?", sessionID, rootID: ancestry.id, approvals: ledger.approvals, ancestry });
-    const limit = effective.sessionUsdLimit ?? resolveLimit(cfg, s.agent);
-    s.limit = limit;
+    const effective = effectiveBudgetLimits(budgetSnapshot(), {
+      agent: s.agent,
+      sessionID,
+      rootID: ancestry.id,
+      approvals: ledger.approvals,
+      ancestry
+    });
     const totals = sessionTotals(sessionID);
-    s.cost = totals.cost ?? 0;
-    s.tokens = { input: totals.input, output: totals.output, reasoning: totals.reasoning, cacheRead: totals.cacheRead, cacheWrite: totals.cacheWrite };
-    const tokenLimit = effective.sessionTokenLimit;
-    const legacyOver = enforceSession && (cfg.usdEnabled && effective.sessionUsdLimit != null && totals.cost >= effective.sessionUsdLimit || effective.legacyTokenLimit != null && totals.totalTokens >= effective.legacyTokenLimit + effective.sessionExtensionTokens);
-    const subagentOver = effective.subagentEffectiveLimit != null && totals.totalTokens >= effective.subagentEffectiveLimit;
-    const usageOver = legacyOver || subagentOver;
-    const root = ancestry;
-    const run = aggregate(ledger, descendants(ledger, root.id));
-    const runLimit = effective.runUsdLimit;
-    const runTokenLimit = effective.runTokenLimit;
-    const runOver = root.complete && (runLimit != null && run.cost >= runLimit || runTokenLimit != null && run.totalTokens >= runTokenLimit);
-    const threshold = cfg.usdEnabled && effective.sessionUsdLimit != null && totals.cost >= effective.sessionUsdLimit * cfg.warnRatio || effective.sessionTokenLimit != null && totals.totalTokens >= effective.sessionTokenLimit * cfg.warnRatio || runLimit != null && run.cost >= runLimit * cfg.warnRatio || runTokenLimit != null && run.totalTokens >= runTokenLimit * cfg.warnRatio;
+    const run = aggregate(ledger, descendants(ledger, ancestry.id));
+    const blockers = [];
+    const check = (scope, dimension, usage, limit, base) => {
+      if (limit != null && usage >= limit)
+        blockers.push({
+          scope,
+          dimension,
+          usage,
+          limit,
+          increment: dimension === "tokens" ? Math.max(base, usage - limit + 1) : Math.max(base, usage - limit + base)
+        });
+    };
+    check("session", "usd", totals.cost, effective.sessionUsdLimit, resolveLimit(cfg, s.agent));
+    const tokenBases = [effective.legacyTokenLimit, effective.subagentBaseLimit].filter((value) => value != null);
+    check("session", "tokens", totals.totalTokens, effective.sessionTokenLimit, Math.min(...tokenBases));
+    if (ancestry.complete) {
+      check("run", "usd", run.cost, effective.runUsdLimit, cfg.runLimit);
+      check("run", "tokens", run.totalTokens, effective.runTokenLimit, cfg.runTokenLimit);
+    }
+    return { s, ancestry, effective, totals, run, blockers };
+  };
+  const checkpointEntry = (sessionID, { ancestry, totals, blockers }) => ({
+    id: sessionID,
+    title: transientTitles.get(sessionID),
+    rootID: ancestry.complete ? ancestry.id : null,
+    totalTokens: totals.totalTokens,
+    input: totals.input,
+    output: totals.output,
+    reasoning: totals.reasoning,
+    canExtend: cfg.onBlock === "ask",
+    blockers
+  });
+  const overLimit = async (sessionID) => {
+    const { s, effective, totals, run, blockers } = budgetState(sessionID);
+    s.limit = effective.sessionUsdLimit ?? resolveLimit(cfg, s.agent);
+    const threshold = [
+      [totals.cost, effective.sessionUsdLimit],
+      [totals.totalTokens, effective.sessionTokenLimit],
+      [run.cost, effective.runUsdLimit],
+      [run.totalTokens, effective.runTokenLimit]
+    ].some(([usage, limit]) => limit != null && usage >= limit * cfg.warnRatio);
     if (!threshold && s.warned)
       s.warned = false;
     if (!s.warned && threshold) {
       s.warned = true;
-      await log("warn", `usage reached ${Math.round(cfg.warnRatio * 100)}% of a configured budget` + `${s.agent ? ` (agent ${s.agent})` : ""}`, { sessionID, agent: s.agent, cost: totals.cost, limit, totalTokens: totals.totalTokens });
+      await log("warn", `usage reached ${Math.round(cfg.warnRatio * 100)}% of a configured budget` + `${s.agent ? ` (agent ${s.agent})` : ""}`, { sessionID, agent: s.agent, cost: totals.cost, limit: s.limit, totalTokens: totals.totalTokens });
     }
-    if (usageOver || runOver)
+    if (blockers.length)
       return true;
     if (cfg.incompleteHistory === "block" && historyCoverage.get(sessionID)?.complete !== true)
       return true;
@@ -6981,6 +6989,8 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
           await enqueue((current, eventID) => recordMessage(current, info, { eventID, writerID: projectContext.instanceID || `${process.pid}`, writerSeq: ++writerSeq }));
           await publishConfig();
           const s = refreshSession(info.sessionID);
+          if (info.agent || info.mode)
+            s.agent = info.agent || info.mode;
           await overLimit(info.sessionID);
         }
       } else if (event.type === "session.created" || event.type === "session.updated") {
@@ -7043,19 +7053,7 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
       await recoverAncestry(input.sessionID);
       await refresh();
       const s = refreshSession(input.sessionID);
-      const ancestry = canonicalRoot(ledger, input.sessionID, projectKey);
-      const totals = sessionTotals(input.sessionID);
-      const effective = effectiveBudgetLimits({
-        sessionLimit: cfg.limit,
-        limits: cfg.limits,
-        agents: cfg.agents,
-        exclude: cfg.exclude,
-        tokenLimit: cfg.tokenLimit,
-        subagentTokenLimit: cfg.subagentTokenLimit,
-        runLimit: cfg.runLimit,
-        runTokenLimit: cfg.runTokenLimit,
-        usdEnabled: cfg.usdEnabled
-      }, { agent: s.agent || "?", sessionID: input.sessionID, rootID: ancestry.id, approvals: ledger.approvals, ancestry });
+      const state = budgetState(input.sessionID);
       const over = await overLimit(input.sessionID);
       if (!over || cfg.action !== "block")
         return;
@@ -7077,18 +7075,8 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
             why: explainCost(s)
           });
         }
-        const title = transientTitles.get(input.sessionID)?.replace(/[\\r\\n<>]/g, " ").slice(0, 80);
-        const checkpoint = effective.subagentEffectiveLimit != null ? `${formatSubagentCheckpoint({
-          id: input.sessionID,
-          title,
-          totalTokens: totals.totalTokens,
-          input: totals.input,
-          output: totals.output,
-          reasoning: totals.reasoning,
-          limit: effective.subagentEffectiveLimit,
-          approvalTokens: effective.subagentBaseLimit
-        })} Parent root ${ancestry.id} is the authority for this decision. ` : "Ask the user whether to continue and how much extra USD or tokens to grant, then call cost_guard_extend and resume; otherwise stop. The existing question tool remains available when permitted. ";
-        throw new Error(`cost-guard: active budget exceeded or history coverage incomplete (${historyCoverage.get(input.sessionID)?.reason || "coverage available"}). ${checkpoint}input ${totals.input} + output ${totals.output} + reasoning ${totals.reasoning} = ${totals.totalTokens} budget tokens (cache excluded). ${explainCost(s)}`);
+        const checkpoint = formatSubagentCheckpoint(checkpointEntry(input.sessionID, state));
+        throw new Error(`cost-guard: active budget exceeded. ${checkpoint}`);
       }
       if (!s.blocked) {
         s.blocked = true;
@@ -7100,7 +7088,7 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
           why: explainCost(s)
         });
       }
-      throw new Error(`cost-guard: session or run usage exceeded an active budget` + `${s.agent ? ` (agent ${s.agent})` : ""}. Raise the limit or switch to a cheaper model.
+      throw new Error(`cost-guard: session or run usage exceeded an active budget` + `${s.agent ? ` (agent ${s.agent})` : ""}. ${formatSubagentCheckpoint(checkpointEntry(input.sessionID, state))}
 ` + explainCost(s));
     },
     "tool.execute.after": async (input, output) => {

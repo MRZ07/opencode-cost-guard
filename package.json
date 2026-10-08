@@ -1,6 +1,6 @@
 {
   "name": "opencode-cost-guard",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "OpenCode usage guard with session/run budgets and native user approval for extensions.",
   "type": "module",
   "main": "index.js",

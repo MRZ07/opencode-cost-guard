@@ -67,7 +67,7 @@ const winner = (records) => {
 export function recordMessage(ledger, info, { recovered = false, receivedAt = Date.now(), writerID = "local", writerSeq, eventID = randomUUID() } = {}) {
   if (!info || typeof info.sessionID !== "string" || !info.sessionID || typeof info.id !== "string" || !info.id) return false;
   writerSeq ??= Math.max(0, ...Object.values(ledger.messages).flatMap(candidatesOf).filter((record) => record.writerID === writerID).map((record) => record.writerSeq || 0)) + 1;
-  const record = { sessionID: info.sessionID, id: info.id, usage: normalizeUsage(info), mode: typeof info.mode === "string" ? info.mode : null,
+  const record = { sessionID: info.sessionID, id: info.id, usage: normalizeUsage(info), mode: typeof info.agent === "string" ? info.agent : typeof info.mode === "string" ? info.mode : null,
     model: info.providerID && info.modelID ? `${info.providerID}/${info.modelID}` : null,
     createdAt: Number.isFinite(info.time?.created) ? info.time.created : null,
     updatedAt: Number.isFinite(info.time?.updated) ? info.time.updated : null,
@@ -317,9 +317,21 @@ export function effectiveBudgetLimits(config, { agent, sessionID, rootID, approv
     runUsdLimit: config.usdEnabled === false || !Number.isFinite(config.runLimit) ? null : config.runLimit + runExtensionUsd,
      runTokenLimit: !Number.isFinite(config.runTokenLimit) ? null : config.runTokenLimit + runExtensionTokens };
 }
-export function formatSubagentCheckpoint({ id, title, totalTokens, input, output, reasoning, limit, approvalTokens }) {
+export function formatSubagentCheckpoint({ id, title, totalTokens, input, output, reasoning, limit, approvalTokens, rootID, blockers, canExtend = true }) {
   const marker = `<!-- cost-guard-checkpoint:${id} -->`;
   const safeTitle = typeof title === "string" ? ` (${title.replace(/[<>]/g, "").slice(0, 80)})` : "";
+  if (blockers) {
+    const facts = blockers.map(({ scope, dimension, usage, limit }) => `${scope} ${dimension}: ${usage}/${limit}`).join("; ");
+    if (!canExtend) return `${marker}\nBudget checkpoint: ${id}${safeTitle}; root ${rootID || "unverified"}; ${facts}. Stop and preserve pending work; onBlock=stop exposes no extension tool. Return this blocker to the primary agent.`;
+    const commands = ["session", "run"].flatMap((scope) => {
+      const group = blockers.filter((item) => item.scope === scope);
+      if (!group.length) return [];
+      const amounts = group.map(({ dimension, increment }) => `${dimension}:${increment}`).join(", ");
+      const target = scope === "session" ? `sessionID:${JSON.stringify(id)}` : 'scope:"run"';
+      return [`cost_guard_extend({${amounts}, ${target}})`];
+    }).join(" then ");
+    return `${marker}\nBudget checkpoint: ${id}${safeTitle}; root ${rootID || "unverified"}; ${facts}. Lifetime tokens ${totalTokens}: input ${input} + output ${output} + reasoning ${reasoning} (cache excluded). Ask the user: (1) Evaluate stuck first from existing progress/failure evidence; recommend Continue or Stop; (2) Continue only after approval; proposed increments ${commands}: request the exact native question, ask it, then retry unchanged only after Approve; or (3) Stop. Evaluation does not approve or unlock. Get final user approval before any extension or restart. Helpers return this blocker; only the verified root can extend. Run scope targets the root itself. Recheck all blockers before resuming the same task; fresh helpers do not bypass run caps.`;
+  }
   return `${marker}\nSubagent checkpoint: ${id}${safeTitle}; ${totalTokens}/${limit} lifetime tokens; input ${input} + output ${output} + reasoning ${reasoning} (cache excluded). Ask the user: (1) Evaluate stuck first: inspect available task results, prior errors, repeated failed checks, and evidence of no progress; state only supported findings and recommend Continue, Stop, or a distinct fresh attempt; (2) Continue only after approval, using cost_guard_extend({tokens:${approvalTokens}, sessionID:"${id}"}); or (3) Stop. Evaluation does not approve or unlock. Get final user approval before any extension or restart. A fresh attempt has a new session, not erased usage or bypassed run caps; token extension may leave USD/run blockers active.`;
 }
 export function appendSubagentCheckpoints(existing = "", entries = [], { limit = 8, maxChars = 6000 } = {}) {

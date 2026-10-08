@@ -189,3 +189,84 @@ test('USD and token run limits each block first, while null leaves both unlimite
   await guard.hooks.event(message('root', 'one', 0.1));
   await guard.hooks['tool.execute.before']({ sessionID: 'root', tool: 'bash' });
 });
+
+test('child USD-only blocks carry the actual agent cap and never propose a token-only extension', async () => {
+  const guard = createCostGuardController(normalizeOptions({ ...options, limit: { 'fusion-ops': 0.5, '*': 5 }, subagentTokenLimit: 1000 }), client, temporary);
+  await guard.hooks.event({ event: { type: 'message.updated', properties: { info: { ...info('child', 'usd-only', 0.5), agent: 'fusion-ops' } } } });
+  await assert.rejects(() => guard.hooks['tool.execute.before']({ tool: 'bash', sessionID: 'child' }), /session usd: 0.5\/0.5/);
+  const result = { output: 'Result: blocked', metadata: { retained: true } };
+  await guard.hooks['tool.execute.after']({ tool: 'task', sessionID: 'root' }, result);
+  assert.match(result.output, /root root; session usd: 0.5\/0.5/);
+  assert.match(result.output, /cost_guard_extend\(\{usd:0.5, sessionID:"child"\}\)/);
+  assert.doesNotMatch(result.output, /session tokens:|tokens:1000/);
+  assert.equal(guard._ledger().approvals.length, 0, 'a recovery notice grants nothing');
+  await approved(guard, ['root', 0.5, undefined, 'session', 'child']);
+  await guard.hooks['tool.execute.before']({ tool: 'bash', sessionID: 'child' });
+  assert.equal(await guard.verifiedTaskNotice('root'), '');
+});
+
+test('mixed session and run blockers identify all dimensions and separate approval scopes', async () => {
+  const guard = createCostGuardController(normalizeOptions({ ...options, runLimit: 2, runTokenLimit: 20 }), client, temporary);
+  await guard.hooks.event(message('child', 'mixed', 2));
+  await guard.hooks.event(message('root', 'root-use', 0));
+  await assert.rejects(() => guard.hooks['tool.execute.before']({ tool: 'bash', sessionID: 'child' }), /active budget/);
+  const entries = await guard.verifiedTaskEntries('root');
+  assert.equal(entries.length, 1);
+  assert.deepEqual(entries[0].blockers.map(({ scope, dimension }) => `${scope}:${dimension}`),
+    ['session:usd', 'session:tokens', 'run:usd', 'run:tokens']);
+  const notice = await guard.verifiedTaskNotice('root');
+  assert.match(notice, /cost_guard_extend\(\{usd:2, tokens:10, sessionID:"child"\}\)/);
+  assert.match(notice, /cost_guard_extend\(\{usd:2, tokens:20, scope:"run"\}\)/);
+  await assert.rejects(() => guard.extend('child', 1, 1), /verified parent root/);
+  await approved(guard, ['root', 2, 10, 'session', 'child']);
+  await assert.rejects(() => guard.hooks['tool.execute.before']({ tool: 'bash', sessionID: 'child' }), /run usd:|run tokens:/);
+  await approved(guard, ['root', 2, 20, 'run']);
+  await guard.hooks['tool.execute.before']({ tool: 'bash', sessionID: 'child' });
+  assert.equal(await guard.verifiedTaskNotice('root'), '');
+});
+
+test('run-only overshoot suggests a sufficient root increment without changing usage', async () => {
+  const guard = createCostGuardController(normalizeOptions({ ...options, limit: 100, subagentTokenLimit: 1000, runLimit: 1, runTokenLimit: 5 }), client, temporary);
+  await guard.hooks.event(message('child', 'overshoot', 4));
+  await assert.rejects(() => guard.hooks['tool.execute.before']({ tool: 'bash', sessionID: 'child' }), /active budget/);
+  const [entry] = await guard.verifiedTaskEntries('root');
+  assert.deepEqual(entry.blockers, [
+    { scope: 'run', dimension: 'usd', usage: 4, limit: 1, increment: 4 },
+    { scope: 'run', dimension: 'tokens', usage: 10, limit: 5, increment: 6 },
+  ]);
+  const notice = await guard.verifiedTaskNotice('root');
+  assert.match(notice, /cost_guard_extend\(\{usd:4, tokens:6, scope:"run"\}\)/);
+  assert.doesNotMatch(notice, /sessionID:"child"/);
+  await approved(guard, ['root', 4, 6, 'run']);
+  await guard.hooks['tool.execute.before']({ tool: 'bash', sessionID: 'child' });
+  assert.equal(aggregate(guard._ledger(), ['child']).totalTokens, 10);
+});
+
+test('recovered native agent metadata selects the same USD cap for blocking and parent notices', async () => {
+  const recoveredClient = { ...client, session: { ...client.session, messages: async ({ path: { id } }) => ({ data: id === 'child' ? [
+    { info: { ...info('child', 'saved', 0.5), agent: 'fusion-ops', time: { created: 2 } } },
+    { info: { ...info('child', 'older', 0), agent: 'fusion-code-worker', time: { created: 1 } } },
+  ] : [] }) } };
+  const guard = createCostGuardController(normalizeOptions({ ...options, limit: { 'fusion-ops': 0.5, '*': 5 }, subagentTokenLimit: 1000 }), recoveredClient, temporary);
+  await assert.rejects(() => guard.hooks['tool.execute.before']({ tool: 'bash', sessionID: 'child' }), /session usd: 0.5\/0.5/);
+  assert.match(await guard.verifiedTaskNotice('root'), /session usd: 0.5\/0.5/);
+});
+
+test('warning mode and excluded session dimensions do not create misleading blocking notices', async () => {
+  const warn = createCostGuardController(normalizeOptions({ ...options, action: 'warn' }), client, temporary);
+  await warn.hooks.event(message('child', 'warn', 2));
+  assert.equal(await warn.verifiedTaskNotice('root'), '');
+  const excluded = createCostGuardController(normalizeOptions({ ...options, exclude: ['fusion-ops'], subagentTokenLimit: 1000 }), client, temporary);
+  await excluded.hooks.event({ event: { type: 'message.updated', properties: { info: { ...info('child', 'excluded', 2), agent: 'fusion-ops' } } } });
+  await excluded.hooks['tool.execute.before']({ tool: 'bash', sessionID: 'child' });
+  assert.equal(await excluded.verifiedTaskNotice('root'), '');
+});
+
+test('stop mode exposes dimension facts without advertising an unavailable approval tool', async () => {
+  const guard = createCostGuardController(normalizeOptions({ ...options, onBlock: 'stop' }), client, temporary);
+  await guard.hooks.event(message('child', 'stop', 2));
+  await assert.rejects(() => guard.hooks['tool.execute.before']({ tool: 'bash', sessionID: 'child' }), /session usd: 2\/1/);
+  const notice = await guard.verifiedTaskNotice('root');
+  assert.match(notice, /onBlock=stop exposes no extension tool/);
+  assert.doesNotMatch(notice, /cost_guard_extend\(/);
+});

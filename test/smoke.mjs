@@ -196,12 +196,12 @@ function assistantEvent(sessionID, id, cost, extra = {}) {
   await hooks.event({ event: { type: "session.created", properties: { info: { id: "child", parentID: "root", directory: process.cwd() } } } });
   await hooks["chat.message"]({ sessionID: "child", agent: "excluded-child" });
   await hooks.event(assistantEvent("child", "at-cap", 0.01, { tokens: { input: 200000, output: 40000, reasoning: 10000, cache: { read: 900000, write: 1 } } }));
-  await assert.rejects(() => hooks["tool.execute.before"]({ tool: "bash", sessionID: "child" }), /Ask the user:.*Evaluate stuck first.*Parent root root/);
+  await assert.rejects(() => hooks["tool.execute.before"]({ tool: "bash", sessionID: "child" }), /root root; session tokens: 250000\/250000.*Ask the user:.*Evaluate stuck first/s);
   assert.match(await verifiedTaskNotice("root"), /\(1\) Evaluate stuck first.*\(2\) Continue only after approval.*\(3\) Stop/);
   assert.match(await verifiedTaskNotice("root"), /cache excluded/);
   assert.equal(await extend("root", undefined, 250000, "session", "child"), 500000);
   await hooks.event(assistantEvent("child", "at-extended-cap", 0.01, { tokens: { input: 400000, output: 80000, reasoning: 20000, cache: { read: 0, write: 0 } } }));
-  await assert.rejects(() => hooks["tool.execute.before"]({ tool: "bash", sessionID: "child" }), /Parent root root/);
+  await assert.rejects(() => hooks["tool.execute.before"]({ tool: "bash", sessionID: "child" }), /root root; session tokens: 750000\/500000/);
   await hooks.event({ event: { type: "session.created", properties: { info: { id: "unknown-child", parentID: "root" } } } });
   await assert.rejects(() => extend("root", undefined, 250000, "session", "unknown-child"), /verified descendant/);
   await assert.rejects(() => extend("root", undefined, 250000, "session", "mismatch-child"), /verified descendant/);
