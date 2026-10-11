@@ -38,10 +38,17 @@ export const CostGuard = async ({ client, directory }, options) => {
   const key = await projectKey(projectDirectory);
   const controller = createCostGuardController(cfg, client, projectDirectory, { projectKey: key, instanceID: randomUUID() });
   const { hooks, extend, describe } = controller;
+  let runtimePublished = false;
   hooks.config = async () => {
     await controller.ready;
     await controller.refresh();
     await controller.publishConfig();
+    if (!runtimePublished && cfg.notify && client.app?.log) {
+      try {
+        await guardRequest((input) => client.app.log(input), { body: { service: "cost-guard", level: "info", message: "Plugin runtime loaded", extra: controller.runtime } }, cfg.historyTimeoutMs);
+      } catch { /* Optional logging must not break plugin initialization. */ }
+      runtimePublished = true;
+    }
   };
 
   if (cfg.onBlock === "ask") {

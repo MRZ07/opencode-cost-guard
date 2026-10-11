@@ -96,7 +96,7 @@ export declare function createCostGuardController(
   client: { app: { log: (input: { body: Record<string, unknown> }) => Promise<unknown> } },
   projectDirectory?: string,
   projectContext?: { projectKey?: string; instanceID?: string },
-): { hooks: Hooks; extend: (sessionID: string, usd?: number, tokens?: number, scope?: "session" | "run", targetSessionID?: string) => Promise<number | string>; requestExtension(sessionID: string, usd?: number, tokens?: number, scope?: "session" | "run", targetSessionID?: string): Promise<{ questions: object[] }>; describe: (sessionID: string) => string; ready: Promise<void>; refresh(): Promise<void>; recoverAncestry(sessionID: string): Promise<{ complete: boolean; id: string; reason?: string }>; ingestSession(info: Record<string, unknown>): Promise<void>; _ledger(): object };
+): { hooks: Hooks; extend: (sessionID: string, usd?: number, tokens?: number, scope?: "session" | "run", targetSessionID?: string) => Promise<number | string>; requestExtension(sessionID: string, usd?: number, tokens?: number, scope?: "session" | "run", targetSessionID?: string): Promise<{ questions: object[] }>; describe: (sessionID: string) => string; runtime: { version: string; optionsHash: string }; ready: Promise<void>; refresh(): Promise<void>; recoverAncestry(sessionID: string): Promise<{ complete: boolean; id: string; reason?: string }>; ingestSession(info: Record<string, unknown>): Promise<void>; _ledger(): object };
 
 export declare const CostGuard: Plugin;
 export default CostGuard;

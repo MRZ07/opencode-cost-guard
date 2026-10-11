@@ -84,6 +84,26 @@ test('actual extension tool asks before mutation; exact blocked-tool whitelist',
   await hooks['tool.execute.before']({ sessionID: 'root', tool: 'bash' });
 });
 
+test('repeated denials stay compact while native recovery remains available', async () => {
+  const guard = createCostGuardController(normalizeOptions({ ...options, tokenLimit: 1, runLimit: 1 }), client, temporary);
+  await guard.hooks.event(message('root', 'repeat-use', 2));
+  let first, repeat;
+  try { await guard.hooks['tool.execute.before']({ sessionID: 'root', tool: 'bash' }); } catch (e) { first = e.message; }
+  try { await guard.hooks['tool.execute.before']({ sessionID: 'root', tool: 'read' }); } catch (e) { repeat = e.message; }
+  assert.match(first, /Budget checkpoint/);
+  assert.match(repeat, /Still blocked: session root; root root/);
+  assert.match(repeat, /session tokens: 10\/1/);
+  assert.match(repeat, /run usd: 2\/1/);
+  assert.match(repeat, /Runtime: cost-guard 0\.8\.2; options [a-f0-9]{16}/);
+  assert.ok(repeat.length < first.length);
+  await guard.hooks['tool.execute.before']({ sessionID: 'root', tool: 'question' });
+  await guard.hooks['tool.execute.before']({ sessionID: 'root', tool: 'cost_guard_extend' });
+  await approved(guard, ['root', 3, 100]);
+  await assert.rejects(guard.hooks['tool.execute.before']({ sessionID: 'root', tool: 'bash' }), /Budget checkpoint/, 'changed blocker dimensions receive a fresh checkpoint');
+  await approved(guard, ['root', 3, undefined, 'run']);
+  await guard.hooks['tool.execute.before']({ sessionID: 'root', tool: 'bash' });
+});
+
 test('invalid settings and explicit malformed or missing files fail visibly', async () => {
   for (const setting of [{ action: 'blok' }, { tokenLimit: '500000' }, { subagentTokenLimit: -1 },
     { runTokenLimit: 1.5 }, { limit: { '*': '5' } }, { limit: 0 }, { agents: [] },

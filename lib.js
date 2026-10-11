@@ -1,7 +1,8 @@
 import { validateOptions } from "./options.js";
 import { createApprovalGate } from "./approval.js";
 import os from "node:os";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
+export const VERSION = "0.8.2";
 import { aggregate, canonicalRoot, createStore, descendants, newLedger, recordMessage, recordSession, tombstoneSession, addApproval, addConfig, mergeRecord, mergeLedger, deltaLedger, hasChanges, projectKey, effectiveBudgetLimits, formatSubagentCheckpoint, appendSubagentCheckpoints, globMatch } from "./accounting.js";
 export { globMatch } from "./accounting.js";
 
@@ -146,6 +147,8 @@ export function normalizeOptions(options = {}) {
  * @returns {{hooks: import("@opencode-ai/plugin").Hooks, extend: (sessionID: string, usd?: number) => number}}
  */
 export function createCostGuardController(cfg, client, projectDirectory, projectContext = {}) {
+  const runtime = { version: VERSION, optionsHash: createHash("sha256").update(JSON.stringify(cfg)).digest("hex").slice(0, 16) };
+  const blockNotices = new Map();
   /** @type {Map<string, {messages: Map<string, number>, cost: number, agent?: string, model?: string, warned: boolean, blocked: boolean}>} */
   const sessions = new Map();
   let ledger = newLedger();
@@ -487,7 +490,7 @@ export function createCostGuardController(cfg, client, projectDirectory, project
   const isAskTool = (tool) => tool === "question" || tool === "cost_guard_extend";
 
   /** One-line why for a session (used by the extend tool). */
-  const describe = (sessionID) => explainCost(get(sessionID));
+  const describe = (sessionID) => explainCost(get(sessionID)) + `\nRuntime: cost-guard ${runtime.version}; options ${runtime.optionsHash}`;
 
     const hooks = {
     event: async ({ event }) => {
@@ -553,7 +556,7 @@ export function createCostGuardController(cfg, client, projectDirectory, project
       const s = refreshSession(input.sessionID);
       const state = budgetState(input.sessionID);
       const over = await overLimit(input.sessionID);
-      if (!over || cfg.action !== "block") return;
+      if (!over || cfg.action !== "block") { blockNotices.delete(input.sessionID); return; }
       if (cfg.onBlock === "ask" && isAskTool(input.tool)) return;
       const coverage = historyCoverage.get(input.sessionID);
       if (cfg.incompleteHistory === "block" && coverage?.complete !== true)
@@ -571,8 +574,14 @@ export function createCostGuardController(cfg, client, projectDirectory, project
             why: explainCost(s),
           });
         }
-        const checkpoint = formatSubagentCheckpoint(checkpointEntry(input.sessionID, state));
-        throw new Error(`cost-guard: active budget exceeded. ${checkpoint}`);
+        const key = JSON.stringify(state.blockers.map(({ scope, dimension, limit }) => ({ scope, dimension, limit })));
+        const repeated = blockNotices.get(input.sessionID) === key;
+        blockNotices.set(input.sessionID, key);
+        const facts = state.blockers.map(({ scope, dimension, usage, limit }) => `${scope} ${dimension}: ${usage}/${limit}`).join("; ");
+        const checkpoint = repeated
+          ? `Still blocked: session ${input.sessionID}; root ${state.ancestry.id || "unverified"}; ${facts}. Do not retry normal tools. Helpers return the blocker; the root uses the existing exact native approval flow or stops with pending work.`
+          : formatSubagentCheckpoint(checkpointEntry(input.sessionID, state));
+        throw new Error(`cost-guard: active budget exceeded. ${checkpoint}\nRuntime: cost-guard ${runtime.version}; options ${runtime.optionsHash}`);
       }
 
       if (!s.blocked) {
@@ -602,7 +611,7 @@ export function createCostGuardController(cfg, client, projectDirectory, project
     "session.idle": async () => { await refresh(); await publishConfig(); },
   };
 
-  return { hooks, extend, requestExtension, describe, ready, refresh, publishConfig, verifiedTaskNotice, verifiedTaskEntries, recoverAncestry,
+  return { hooks, extend, requestExtension, describe, runtime, ready, refresh, publishConfig, verifiedTaskNotice, verifiedTaskEntries, recoverAncestry,
     ingestSession: async (info) => {
       if (typeof info?.title === "string") transientTitles.set(info.id, info.title.slice(0, 512));
       if (Object.hasOwn(info || {}, "parentID")) metadataParents.set(info.id, info.parentID);

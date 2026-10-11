@@ -149,3 +149,15 @@ Run `npm run bench:journal` to create private temporary journals with 100, 1,000
 ## License
 
 MIT
+
+## Runtime and repeated blocks
+
+Startup logs (when `notify` is enabled), extension results and ask-mode budget
+errors include the loaded version and an effective-options fingerprint, without
+printing configuration contents. Repeated denials for unchanged blocking limits
+use a compact notice with current session/root and scope/dimension usage. A change
+in blocked dimensions/limits receives a fresh complete recovery checkpoint.
+Native `question` and `cost_guard_extend` remain available in ask mode. Helpers
+return the blocker; only the verified root extends after exact native approval.
+This reduces repeated context transfer; it does not stop all model generation in
+ask mode or approve any work. Stop mode retains its output cap.

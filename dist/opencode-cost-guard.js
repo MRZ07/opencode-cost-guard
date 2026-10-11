@@ -5785,7 +5785,7 @@ function createApprovalGate({ now = Date.now } = {}) {
 
 // lib.js
 import os2 from "node:os";
-import { randomUUID as randomUUID3 } from "node:crypto";
+import { randomUUID as randomUUID3, createHash as createHash2 } from "node:crypto";
 
 // accounting.js
 import fs from "node:fs/promises";
@@ -6432,6 +6432,7 @@ async function createStore({ directory, filename, projectDirectory = process.cwd
 }
 
 // lib.js
+var VERSION = "0.8.2";
 function parseLimits(raw, fallback = 5) {
   const isUsd = (n) => Number.isFinite(n) && n > 0;
   if (raw == null)
@@ -6534,6 +6535,8 @@ function normalizeOptions(options = {}) {
   };
 }
 function createCostGuardController(cfg, client, projectDirectory, projectContext = {}) {
+  const runtime = { version: VERSION, optionsHash: createHash2("sha256").update(JSON.stringify(cfg)).digest("hex").slice(0, 16) };
+  const blockNotices = new Map;
   const sessions = new Map;
   let ledger = newLedger();
   const approvalGate = createApprovalGate();
@@ -6977,7 +6980,8 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
     }).effectiveSessionTokenLimit;
   };
   const isAskTool = (tool) => tool === "question" || tool === "cost_guard_extend";
-  const describe = (sessionID) => explainCost(get(sessionID));
+  const describe = (sessionID) => explainCost(get(sessionID)) + `
+Runtime: cost-guard ${runtime.version}; options ${runtime.optionsHash}`;
   const hooks = {
     event: async ({ event }) => {
       await ready;
@@ -7055,8 +7059,10 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
       const s = refreshSession(input.sessionID);
       const state = budgetState(input.sessionID);
       const over = await overLimit(input.sessionID);
-      if (!over || cfg.action !== "block")
+      if (!over || cfg.action !== "block") {
+        blockNotices.delete(input.sessionID);
         return;
+      }
       if (cfg.onBlock === "ask" && isAskTool(input.tool))
         return;
       const coverage = historyCoverage.get(input.sessionID);
@@ -7075,8 +7081,13 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
             why: explainCost(s)
           });
         }
-        const checkpoint = formatSubagentCheckpoint(checkpointEntry(input.sessionID, state));
-        throw new Error(`cost-guard: active budget exceeded. ${checkpoint}`);
+        const key = JSON.stringify(state.blockers.map(({ scope, dimension, limit }) => ({ scope, dimension, limit })));
+        const repeated = blockNotices.get(input.sessionID) === key;
+        blockNotices.set(input.sessionID, key);
+        const facts = state.blockers.map(({ scope, dimension, usage, limit }) => `${scope} ${dimension}: ${usage}/${limit}`).join("; ");
+        const checkpoint = repeated ? `Still blocked: session ${input.sessionID}; root ${state.ancestry.id || "unverified"}; ${facts}. Do not retry normal tools. Helpers return the blocker; the root uses the existing exact native approval flow or stops with pending work.` : formatSubagentCheckpoint(checkpointEntry(input.sessionID, state));
+        throw new Error(`cost-guard: active budget exceeded. ${checkpoint}
+Runtime: cost-guard ${runtime.version}; options ${runtime.optionsHash}`);
       }
       if (!s.blocked) {
         s.blocked = true;
@@ -7112,6 +7123,7 @@ function createCostGuardController(cfg, client, projectDirectory, projectContext
     extend,
     requestExtension,
     describe,
+    runtime,
     ready,
     refresh,
     publishConfig,
@@ -7166,10 +7178,17 @@ var CostGuard = async ({ client, directory }, options) => {
   const key = await projectKey(projectDirectory);
   const controller = createCostGuardController(cfg, client, projectDirectory, { projectKey: key, instanceID: randomUUID4() });
   const { hooks, extend, describe } = controller;
+  let runtimePublished = false;
   hooks.config = async () => {
     await controller.ready;
     await controller.refresh();
     await controller.publishConfig();
+    if (!runtimePublished && cfg.notify && client.app?.log) {
+      try {
+        await guardRequest((input) => client.app.log(input), { body: { service: "cost-guard", level: "info", message: "Plugin runtime loaded", extra: controller.runtime } }, cfg.historyTimeoutMs);
+      } catch {}
+      runtimePublished = true;
+    }
   };
   if (cfg.onBlock === "ask") {
     hooks.tool = {
